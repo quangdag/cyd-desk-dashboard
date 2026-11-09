@@ -1,105 +1,86 @@
-# 🌐 LCD Control ESP32 CYD
+# CYD Desk Dashboard
 
-Một giao diện LCD **ESP32 CYD** (ESP32-2432S028R, 2.8" ILI9341 + cảm ứng XPT2046), phong cách **Claude editorial**:
-- Nền giấy ngà, chữ màu mực nâu, nhấn bằng màu đất nung.
-- Các con số lớn dùng font serif **Fraunces**; chữ nhỏ dùng Montserrat.
-- Giao diện bằng tiếng Anh; riêng dòng âm lịch giữ tiếng Việt.
+A desk companion built on the **ESP32 "Cheap Yellow Display"** (ESP32-2432S028R, 2.8" 320×240 touchscreen).
+It shows the time with the Vietnamese lunar calendar, live weather and air quality, **Claude Code / Claude account usage**,
+what's playing on my PC, PC temperatures, and a Pomodoro timer. A small Python server on the laptop feeds it data.
 
-**HOME** là lưới 9 ô. Mỗi ô hiện một con số xem nhanh của tab đó. Có 8 tab:
+*Tiếng Việt: [README.vi.md](README.vi.md)*
 
-1. **Clock**: thứ, ngày, giờ (NTP), dòng **âm lịch** tiếng Việt kèm can chi, và một dòng tóm tắt thời tiết.
-2. **Weather**: nhiệt độ, cảm giác như, độ ẩm, gió và **AQI**. Nguồn Open-Meteo.
-3. **Forecast**: 6 giờ tới và 3 ngày tới, kèm khả năng mưa.
-4. **Claude Code**: % phiên 5 giờ, % tuần, token và chi phí hôm nay, và **CONTEXT**: độ đầy ngữ cảnh của phiên đang chạy. Ý tưởng lấy từ [claudometer](https://github.com/krizdingus/claudometer).
-5. **Account**: hạn mức chung của cả tài khoản Claude (Chat, Code, Cowork dùng chung), kèm tỷ lệ sử dụng tuần này theo từng nơi (Claude Code / Chats / Cowork / Other).
-6. **Music**: bài đang phát trên PC (Spotify, YouTube trên Chrome/Edge, Apple Music…), kèm nút trước / phát-tạm dừng / sau.
-7. **System** (Acer Nitro 5): CPU (tải + nhiệt độ), RAM, GPU (tải + nhiệt độ), VRAM.
-8. **Pomodoro**: nút − / + hai bên đồng hồ để chỉnh thời lượng pha hiện tại, mỗi lần 5 phút. Thời lượng được lưu lại.
+<!-- Add photos to docs/images/ and they show up here -->
+<!-- ![Home](docs/images/home.jpg) ![Claude Code](docs/images/claude.jpg) -->
 
-**Điều khiển:**
-- **Tap một ô trên HOME:** mở tab đó. Tab đứng yên, không tự chuyển.
-- **Tap ở bất kỳ đâu trong tab:** quay về HOME. Các nút trong tab Music và Pomodoro vẫn bấm bình thường.
-- **Ô SLIDESHOW:** các tab đã chọn tự chuyển mỗi 20 giây.
-- **Giữ một ô trên HOME (hoặc giữ ngay trong tab):** thêm vào hoặc bớt tab đó khỏi slideshow. Ô có chấm cam là đang nằm trong slideshow.
-- Chế độ đang dùng và tab đang mở được nhớ lại sau khi mất điện.
-- Đèn nền luôn sáng 100%.
+## Features
 
-**Thông báo Claude Code:** khi Claude làm xong việc hoặc đang chờ bạn (cần cấp quyền), CYD hiện thẻ thông báo kèm tiếng bíp (nếu có gắn loa vào cổng loa của CYD, GPIO26). Tap vào thẻ để đóng.
+| Tab | What it shows |
+|---|---|
+| **Home** | 3×3 launcher with a live value on each tile. Tap a tile to open it, hold to add it to the slideshow |
+| **Clock** | Time, date, Vietnamese lunar date with can-chi year (computed on the ESP32), weather summary |
+| **Weather / Forecast** | Temperature, feels-like, humidity, wind, US AQI; next 6 hours and 3 days (Open-Meteo) |
+| **Claude Code** | 5-hour session %, weekly %, tokens and API-equivalent cost today, context window of the active session |
+| **Claude Account** | Account-wide limits plus this week's usage split by app (Claude Code / Chats / Cowork) |
+| **Music** | Now playing from any Windows app (Spotify, YouTube in Chrome…), 80×80 album art, prev / play / next |
+| **System** | CPU load and temperature, RAM, GPU load and temperature, VRAM |
+| **Pomodoro** | Adjustable focus / break lengths, saved across reboots |
+| **Settings** | Sound, notification mode, slideshow speed, alerts |
 
----
+**Notifications** – a Claude Code hook tells the device when Claude finishes or needs permission. In *away* mode it
+only alerts when I've been idle for a minute or the task ran for two, so it stays quiet while I'm at the desk.
+It also warns at 80% / 95% session usage, when the quota resets, and when rain is likely in the next two hours.
 
-## 📸 Giao diện chính (Main Interface)
-![z6675923609791_7ed76e9d6b3eff1e5c8630ac3c778c00](https://github.com/user-attachments/assets/90dbaeac-5456-43d3-a457-464e2ec63457)
-![z6675923586984_0091994fcaee301bc336a025477702ad](https://github.com/user-attachments/assets/be5b750a-a226-4d9b-ac6b-4d61fd2e34d8)
+## Architecture
 
-## 📂 Cách sử dụng (How to Use)
-
-### 1. Thư viện Arduino
-Cần ESP32 core 3.x, `lvgl` 9.x, `TFT_eSPI` (dùng `User_Setup.h` cho CYD), `XPT2046_Touchscreen` và `ArduinoJson` 7.
-
-Trong `lv_conf.h` cần đặt `LV_USE_STDLIB_MALLOC` bằng `LV_STDLIB_CLIB`, để LVGL dùng heap của ESP32: 6 trang không đủ chỗ trong pool mặc định 36 KB. Ngoài ra cần bật `LV_FONT_MONTSERRAT_14`, font này dùng cho các biểu tượng.
-
-Các font tự tạo nằm ở `src/fonts/`:
-- Montserrat bản có dấu tiếng Việt, cho dòng âm lịch.
-- Chữ số Fraunces các cỡ 24, 34, 56 và 64.
-
-Muốn tạo lại hoặc thêm cỡ chữ, dùng `tools/make_lvgl_font.py` (chỉ cần Python và Pillow, không cần Node.js). Với font biến thể như Fraunces, dùng thêm `--axes opsz,wght,SOFT,WONK`.
-
-### 2. Cấu hình
-Copy `ESP32_tft_clock_weather/secrets.example.h` thành `secrets.h`, rồi điền:
-- `WIFI_SSID` và `WIFI_PASSWORD`
-- `CLAUDE_HOST`: IP LAN của máy tính chạy server (xem bước 4)
-- `CLAUDE_TOKEN`: một chuỗi ngẫu nhiên bất kỳ. Server sẽ tự đọc token từ file này.
-
-Muốn tắt trang Claude thì đặt `CLAUDE_ENABLED` bằng `0`.
-
-Múi giờ và toạ độ chỉnh ở đầu file `.ino`.
-
-`secrets.h` đã nằm trong `.gitignore`, nên sẽ không bị đẩy lên GitHub.
-
-### 3. Nạp code
-Mở `ESP32_tft_clock_weather.ino` trong Arduino IDE, chọn board **ESP32 Dev Module** và chọn **Tools → Partition Scheme → Huge APP (3MB No OTA/1MB SPIFFS)**. Bắt buộc phải chọn, vì firmware khoảng 2 MB do icon ARGB8888, vượt phân vùng mặc định 1,3 MB. Sau đó nạp code.
-
-### 4. Server Claude usage trên PC
-CYD không đọc được log của Claude Code, nên cần chạy một server nhỏ trên chính máy bạn dùng Claude Code. Server chỉ dùng thư viện chuẩn Python 3.9+ và chạy được trên Windows, macOS và Linux.
-
-```bash
-python pc_server/claude_usage_server.py --plan max-5x
+```mermaid
+flowchart LR
+  subgraph PC["Laptop (Windows)"]
+    CC["Claude Code<br/>logs + hooks"] --> S["claude_usage_server.py<br/>(stdlib HTTP, ~30 MB RAM)"]
+    W["Windows media controls<br/>CPU / RAM / nvidia-smi"] --> S
+  end
+  A["Anthropic usage API"] --> S
+  S -- "HTTP JSON + UDP beacon/events" --> E["ESP32 CYD<br/>LVGL 9 UI"]
+  O["Open-Meteo<br/>weather + AQI"] --> E
 ```
 
-- `--plan`: chọn `free`, `pro`, `max-5x` hoặc `max-20x`. Gói này quyết định mức trần dùng để tính %.
-- Server đọc `~/.claude/projects/**/*.jsonl` và trả về `GET /v1/stats` qua cổng `7842`, đúng schema v1 của claudometer. Nếu bạn chạy daemon claudometer gốc trên Mac/Linux thì CYD cũng đọc được.
-- Lần chạy đầu, Windows sẽ hỏi quyền tường lửa. Hãy cho phép **Private network**.
-- Lệnh `--print` in ra một mẫu JSON rồi thoát, dùng để kiểm tra nhanh.
-- **Tự tìm IP:** server phát gói UDP broadcast `CLAUDE_USAGE 1 7842` mỗi 5 giây lên cổng 7843. Khi laptop đổi IP, CYD tự nhận địa chỉ mới; `CLAUDE_HOST` chỉ dùng làm mặc định.
-- **Tự khởi động cùng Windows:** tạo shortcut tới `pythonw.exe` (chạy ngầm, không hiện cửa sổ) trong thư mục `shell:startup`, với tham số `claude_usage_server.py --plan pro --log server.log`. Muốn tắt tự khởi động thì xoá shortcut đó.
+- **Firmware** – Arduino on ESP32, LVGL 9 + TFT_eSPI. Networking runs in its own FreeRTOS task on core 0, so the UI
+  never blocks on Wi-Fi; data is handed over under a mutex. Includes a loop watchdog, a network-stall watchdog and a
+  low-memory restart for 24/7 use.
+- **PC server** – single-file Python (standard library, plus `winrt` for media). Serves `GET /v1/stats` in the
+  [claudometer](https://github.com/krizdingus/claudometer) schema, reads exact usage from Anthropic's OAuth usage
+  endpoint (falls back to estimates from local logs), and only measures PC sensors while the device shows that tab.
+  Measured cost: about 0.015 % CPU and 38 MB RAM in the busiest case.
+- **Discovery** – the server broadcasts its address over UDP, so the device follows the laptop when its IP changes.
+- **Typography** – Montserrat and Fraunces converted to LVGL bitmap fonts by a small Pillow-based converter
+  (`tools/make_lvgl_font.py`), including Vietnamese diacritics.
 
-**Số chính xác (khuyên dùng):** cài [Claude Code CLI](https://claude.ai/install.ps1) rồi chạy `claude auth login` một lần.
+## Tech
 
-- Server sẽ lấy % và giờ reset từ chính nguồn mà lệnh `/usage` dùng (`api.anthropic.com/api/oauth/usage`). Mỗi lần lấy cách nhau 2 phút, và chỉ lấy khi CYD đang hỏi số liệu. Nếu bị giới hạn tần suất (HTTP 429), server tự giãn thời gian chờ, tối đa 15 phút.
-- Giữa hai lần lấy, server cộng thêm phần dùng mới từ log để số trên CYD vẫn chạy theo thời gian thực.
-- Token chỉ gửi tới Anthropic. Khi token hết hạn, server tự làm mới.
-- Nếu không lấy được (mất mạng, bị đăng xuất…), server tự quay về cách ước tính bên dưới.
-- Tắt tính năng này bằng `--no-exact`.
+ESP32 · C++ / Arduino · LVGL 9 · FreeRTOS · TFT_eSPI · XPT2046 · ArduinoJson · Python · WinRT · REST / UDP · Open-Meteo
 
-**Thông báo Claude Code (hooks):** trong `~/.claude/settings.json` có hai hook `Stop` và `Notification`. Mỗi hook chạy `pc_server/notify.py`, script này báo cho server, rồi server đẩy ngay sang CYD qua UDP. Muốn tắt thông báo thì xoá mục `hooks` trong file đó.
+## Repository layout
 
-**Tab Music:** dùng trung tâm điều khiển media có sẵn của Windows (Global System Media Transport Controls), nên đọc được mọi app phát nhạc: Spotify, YouTube trên trình duyệt, Apple Music…
-- Cần cài thư viện cho Python: `pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation`.
-- Server chỉ đọc khi CYD đang mở tab này.
-- Nút bấm trên CYD gửi lệnh `POST /v1/media` về server.
-
-**Tab Account:** số liệu lấy từ cùng nguồn usage chính xác của Anthropic. Cần đã đăng nhập bằng `claude auth login`.
-
-**Trang System:** server chỉ đo khi CYD đang mở trang này.
-- CPU và RAM đọc bằng Windows API.
-- Nhiệt độ CPU lấy từ cảm biến nhiệt ACPI (`typeperf`, không cần quyền admin). Mỗi lượt `typeperf` tự tắt sau 60 giây.
-- GPU đọc bằng `nvidia-smi`.
-
-**Hiệu chỉnh % cho khớp claude.ai (chế độ ước tính):** mở trang usage trên claude.ai, rồi chạy ngay lệnh dưới với hai số % đang hiển thị (session, tuần). Server đang chạy sẽ tự đọc lại, không cần khởi động lại.
-```bash
-python pc_server/claude_usage_server.py --calibrate 13 17
 ```
-Sau khi hiệu chỉnh, mức dùng được tính theo chi phí quy đổi API, tức là có trọng số theo model (Opus tính nặng hơn Haiku). Cách này bám sát claude.ai hơn so với đếm token thô.
+ESP32_tft_clock_weather/   firmware (main sketch, net.ino, ui_build.ino, ui_update.ino, fonts, icons)
+pc_server/                 claude_usage_server.py, notify.py (Claude Code hook)
+config/                    lv_conf.h and TFT_eSPI User_Setup.h used for this build
+tools/                     font converter, image converter, original icons
+```
 
-> ⚠️ % chỉ là **ước tính**. Anthropic không công bố trần token; số liệu ở đây do claudometer suy ngược. Nếu lệch so với trang usage trên claude.ai, chỉnh bằng `--session-cap` và `--weekly-cap`. Chi phí $ cũng là ước tính theo bảng giá trong script.
+## Build
+
+1. Arduino IDE with ESP32 core 3.x and the libraries `lvgl` 9.x, `TFT_eSPI`, `XPT2046_Touchscreen`, `ArduinoJson` 7.
+   Copy `config/lv_conf.h` next to the `lvgl` library and `config/User_Setup.h` into `TFT_eSPI`.
+2. Copy `ESP32_tft_clock_weather/secrets.example.h` to `secrets.h` and fill in Wi-Fi and server details.
+3. Board **ESP32 Dev Module**, partition scheme **Huge APP (3MB No OTA)**, upload.
+4. On the PC: `python pc_server/claude_usage_server.py --plan pro` (details and options in [README.vi.md](README.vi.md)).
+
+The touch calibration in `ui_build.ino` (`TOUCH_RAW_*`) was measured on my panel; re-measure for another board.
+
+## Credits
+
+- Claude usage idea and JSON schema: [claudometer](https://github.com/krizdingus/claudometer) (MIT)
+- Fonts: [Montserrat](https://github.com/JulietaUla/Montserrat) and [Fraunces](https://github.com/undercasetype/Fraunces), SIL Open Font License 1.1
+- Weather and air quality: [Open-Meteo](https://open-meteo.com/)
+- Weather icons: from the Random Nerd Tutorials CYD + LVGL weather station example
+- Lunar calendar algorithm: Hồ Ngọc Đức
+- Built with help from Claude Code
+
+License: [MIT](LICENSE) (fonts under the SIL Open Font License).
