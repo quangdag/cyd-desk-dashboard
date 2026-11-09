@@ -213,10 +213,10 @@ static void update_pc_display(const PcData& p) {
   lv_label_set_text(pc_val[0], buf);
   set_temp_color(pc_val[0], p.cpu_temp);
   set_pct_bar(pc_bar[0], max(p.cpu, 0));
-  if (p.cpu_temp >= 0) {
-    snprintf(buf, sizeof(buf), "%d°C", p.cpu_temp);
-    lv_label_set_text(home_val[SCR_PC], buf);
-  }
+  if (p.cpu_temp >= 0) snprintf(buf, sizeof(buf), "%d°C", p.cpu_temp);
+  else if (p.cpu >= 0) snprintf(buf, sizeof(buf), "%d%%", p.cpu);
+  else snprintf(buf, sizeof(buf), "--");
+  lv_label_set_text(home_val[SCR_PC], buf);
 
   snprintf(buf, sizeof(buf), "%.1f / %.1f GB | %d%%", p.ram_used, p.ram_total, p.ram_pct);
   lv_label_set_text(pc_val[1], buf);

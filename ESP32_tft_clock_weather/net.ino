@@ -147,8 +147,7 @@ static bool check_beacon() {
 
 // Giao thuc claudometer: GET /v1/stats, Bearer token, schema 1 (+ event, context, account, pc, media)
 static bool fetch_claude(ScreenState scr) {
-  String screens = "home";
-  if (scr == SCR_PC) screens += ",pc";
+  String screens = "home,pc";  // pc luon kem: o System tren Home co so ngay tu luc khoi dong
   if (scr == SCR_MUSIC) screens += ",media";
   JsonDocument doc;
   bool ok = http_get_json(server_url("/v1/stats?screens=") + screens, doc, CLAUDE_TOKEN, HTTP_TIMEOUT_MS) &&
@@ -251,6 +250,31 @@ static bool fetch_claude(ScreenState scr) {
 }
 
 // Anh bia: tai 80x80 RGB565 (12.8 KB) vao bo dem khong dang hien thi, roi bao UI doi
+// Bo goc anh bia: pha 4 goc vao mau nen (khu rang cua theo do phu cua cung tron).
+// Lam mot lan tren task mang khi tai anh -> LVGL chi ve anh thuong, khong can clip_corner (ton RAM/CPU).
+static void round_art_corners(uint16_t* px) {
+  const lv_color_t bg = lv_color_hex(C_BG);
+  const float r = ART_RADIUS;
+  for (int y = 0; y < ART_RADIUS; y++) {
+    for (int x = 0; x < ART_RADIUS; x++) {
+      // do phu: khoang cach tu tam pixel toi tam cung tron (r, r)
+      float dx = r - (x + 0.5f), dy = r - (y + 0.5f);
+      float d = sqrtf(dx * dx + dy * dy);
+      float cover = r + 0.5f - d;  // >=1: trong anh, <=0: ngoai -> mau nen
+      if (cover >= 1.0f) continue;
+      uint8_t a = cover <= 0 ? 0 : (uint8_t)(cover * 255);
+      const int xs[2] = {x, ART_SIZE - 1 - x}, ys[2] = {y, ART_SIZE - 1 - y};
+      for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 2; j++) {
+          uint16_t& p = px[ys[j] * ART_SIZE + xs[i]];
+          lv_color_t c = lv_color_mix(lv_color_make((p >> 8) & 0xF8, (p >> 3) & 0xFC, (p << 3) & 0xF8), bg, a);
+          p = lv_color_to_u16(c);
+        }
+      }
+    }
+  }
+}
+
 static void fetch_album_art() {
   char want[12];
   xSemaphoreTake(data_mutex, portMAX_DELAY);
@@ -284,6 +308,7 @@ static void fetch_album_art() {
   }
   http.end();
   if (!ok) return;
+  round_art_corners((uint16_t*)art_buf[back]);
   strlcpy(art_loaded_id, want, sizeof(art_loaded_id));
   art_front = back;
   art_dirty = true;

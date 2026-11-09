@@ -218,6 +218,7 @@ void create_home_screen() {
     lv_obj_set_pos(home_val[idx], 9, 6);
     lv_obj_t* name = make_caps(t, slideshow ? C_BG : C_MUTED, slideshow ? "SLIDESHOW" : SCREEN_NAMES[idx]);
     lv_obj_set_pos(name, 9, 43);
+    if (idx == SCR_CLAUDE) lv_obj_set_style_text_letter_space(name, 0, 0);  // "CLAUDE CODE" vua khit o 98px
     if (!slideshow) {
       home_dot[idx] = make_dot(t, 8, C_ACCENT);
       lv_obj_align(home_dot[idx], LV_ALIGN_TOP_RIGHT, -8, 8);
@@ -414,7 +415,7 @@ void create_music_screen() {
   lv_obj_remove_style_all(frame);
   lv_obj_set_size(frame, ART_SIZE, ART_SIZE);
   lv_obj_set_pos(frame, 14, 32);
-  lv_obj_set_style_radius(frame, 8, 0);
+  lv_obj_set_style_radius(frame, ART_RADIUS, 0);
   lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(frame, lv_color_hex(C_TILE), 0);
   no_click(frame);
@@ -428,11 +429,11 @@ void create_music_screen() {
   mu_title = make_label(scr, &mont_vi_20, C_FG, "Nothing playing");
   lv_obj_set_width(mu_title, 196);
   lv_label_set_long_mode(mu_title, LV_LABEL_LONG_SCROLL_CIRCULAR);  // ten dai -> chay chu
-  lv_obj_set_pos(mu_title, 108, 40);
+  lv_obj_set_pos(mu_title, 108, 38);  // font co them 2px tren dau cho dau tieng Thai
   mu_artist = make_label(scr, &mont_vi_14, C_MUTED, "Play something on Spotify or YouTube");
   lv_obj_set_width(mu_artist, 196);
   lv_label_set_long_mode(mu_artist, LV_LABEL_LONG_DOT);
-  lv_obj_set_pos(mu_artist, 108, 72);
+  lv_obj_set_pos(mu_artist, 108, 69);
 
   mu_bar = make_bar(scr, 14, 124, 292, 4);
   mu_pos = make_label(scr, &lv_font_montserrat_12, C_MUTED, "");
@@ -579,8 +580,10 @@ void create_settings_screen() {
     }
   }
   lv_obj_t* help = make_label(scr, &lv_font_montserrat_12, C_MUTED,
-                              "AWAY: notify only if you're idle 1+ min or Claude ran 2+ min.\n"
-                              "ALERTS: Claude quota 80% / 95%, fresh session, rain soon.");
+                              "AWAY: alert if idle 1 min+ or Claude ran 2 min+\n"
+                              "ALERTS: quota 80% / 95%, new session, rain");
+  lv_obj_set_width(help, 292);
+  lv_label_set_long_mode(help, LV_LABEL_LONG_DOT);
   lv_obj_set_pos(help, 14, 206);
   refresh_settings_buttons();
 }

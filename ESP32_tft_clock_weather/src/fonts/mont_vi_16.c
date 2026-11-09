@@ -1211,5 +1211,5 @@ const lv_font_t mont_vi_16 = {
     .line_height = 21, .base_line = 5,
     .subpx = LV_FONT_SUBPX_NONE, .underline_position = -1, .underline_thickness = 1,
     .dsc = &font_dsc,
-    .fallback = &lv_font_montserrat_14,  /* LV_SYMBOL_* icons */
+    .fallback = &lv_font_montserrat_14,
 };

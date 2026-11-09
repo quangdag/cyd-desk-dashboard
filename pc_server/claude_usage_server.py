@@ -546,9 +546,9 @@ def user_idle_seconds() -> float:
 
 class ThermalZone:
     """CPU-area temperature from the ACPI thermal zone perf counter (readable without admin).
-    `typeperf` streams a sample every 2 s for at most 60 s (-sc 30), so it always exits on
+    `typeperf` streams a sample every second for at most 60 s (-sc 60), so it always exits on
     its own - even if this server is killed - and is restarted on the next request.
-    Nothing runs while the CYD shows other pages."""
+    It runs for at most a minute after each request, so it stops when the CYD stops asking."""
 
     COUNTER = r"\Thermal Zone Information(*)\Temperature"
 
@@ -556,6 +556,8 @@ class ThermalZone:
         self.lock = threading.Lock()
         self.proc = None
         self.value = None
+        self.value_ts = 0.0
+        self.first = threading.Event()
         self.last_used = 0.0
 
     def _reader(self, proc):
@@ -573,25 +575,33 @@ class ThermalZone:
                     temps.append(k - 273.15)
             if temps:
                 self.value = round(max(temps))
+                self.value_ts = time.monotonic()
+                self.first.set()
         proc.kill()
         with self.lock:
             if self.proc is proc:
                 self.proc = None
-                if time.monotonic() - self.last_used > 60:
-                    self.value = None  # idle: drop the old reading; otherwise keep it until the next run
 
-    def get(self):
+    def get(self, wait_s: float = 0.0):
+        """Latest reading. A reading up to 10 min old is still returned while the CYD polls slowly
+        (Home page, once a minute), so its System tile has a value from boot on. With wait_s, a cold
+        start blocks briefly for the first sample instead of answering 'no value'."""
         import subprocess
         self.last_used = time.monotonic()
         with self.lock:
             if self.proc is None:
                 try:
+                    self.first.clear()
                     self.proc = subprocess.Popen(
-                        ["typeperf", self.COUNTER, "-si", "2", "-sc", "30"], stdout=subprocess.PIPE,
+                        ["typeperf", self.COUNTER, "-si", "1", "-sc", "60"], stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL, text=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
                     threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
                 except OSError:
                     return None
+        if time.monotonic() - self.value_ts > 600:
+            if wait_s > 0 and self.first.wait(wait_s):
+                return self.value
+            return None
         return self.value
 
 
@@ -664,8 +674,13 @@ class PcStats:
             ts, val = self.cached
             if val is None or time.monotonic() - ts > 2:
                 try:
-                    val = {"cpu_pct": self._cpu_pct(), "cpu_temp_c": self.thermal.get(),
-                           "ram": self._ram(), "gpu": self._gpu()}
+                    self.thermal.get()  # starts typeperf (first sample ~2 s) while the rest is measured
+                    if self.prev_cpu is None:  # first request after start: take a short baseline sample
+                        self._cpu_pct()
+                        time.sleep(0.3)
+                    gpu = self._gpu()
+                    val = {"cpu_pct": self._cpu_pct(), "cpu_temp_c": self.thermal.get(wait_s=2.8),
+                           "ram": self._ram(), "gpu": gpu}
                 except Exception:
                     val = None
                 self.cached = (time.monotonic(), val)
@@ -673,6 +688,24 @@ class PcStats:
 
 
 # ---- Now playing (Windows media sessions: Spotify, YouTube in Chrome/Edge, ...) ----
+
+THAI_UPPER = set("ัิีึื็")
+
+
+def thai_marks(text: str) -> str:
+    """The CYD draws Thai without shaping, so a tone mark (U+0E48-0E4C) over an upper vowel or before
+    SARA AM would sit on top of it. Swap those for the raised copies in the CYD's Thai font (U+F748-F74C)."""
+    if not any("่" <= ch <= "์" for ch in text):
+        return text
+    out = list(text)
+    for i, ch in enumerate(out):
+        if "่" <= ch <= "์":
+            prev_upper = i > 0 and text[i - 1] in THAI_UPPER
+            next_am = i + 1 < len(text) and text[i + 1] == "ำ"
+            if prev_upper or next_am:
+                out[i] = chr(0xF700 + ord(ch) - 0x0E00)
+    return "".join(out)
+
 
 class MediaSessions:
     """Reads and controls whatever app is playing through Windows' global media controls
@@ -700,8 +733,75 @@ class MediaSessions:
         return aumid.split("!")[0].split(".")[0][:16] or "Media"
 
     async def _session(self):
+        """The session to show: Windows' current one if it is playing, otherwise any session that is
+        playing (e.g. a Facebook video in Chrome while Spotify sits paused), otherwise the current one."""
         mgr = await self.mm.request_async()
-        return mgr.get_current_session()
+        cur = mgr.get_current_session()
+        if cur and int(cur.get_playback_info().playback_status) == 4:
+            return cur
+        for s in mgr.get_sessions():
+            if int(s.get_playback_info().playback_status) == 4:
+                return s
+        return cur
+
+    SITE_NAMES = {"facebook": "Facebook", "youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram",
+                  "soundcloud": "SoundCloud", "netflix": "Netflix", "twitch": "Twitch", "zingmp3": "Zing MP3",
+                  "nhaccuatui": "NhacCuaTui"}
+
+    @classmethod
+    def _browser_tab_title(cls, exe: str) -> str:
+        """Title of the browser's audible-looking window, used when a site (Facebook...) publishes no
+        media metadata. Picks the first visible top-level window of that browser that names a known site."""
+        import ctypes
+        from ctypes import wintypes
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        titles = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def enum(hwnd, _):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return True
+            try:
+                buf, size = ctypes.create_unicode_buffer(260), wintypes.DWORD(260)
+                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)) and                         buf.value.lower().endswith(exe):
+                    t = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, t, n + 1)
+                    titles.append(t.value)
+            finally:
+                kernel32.CloseHandle(h)
+            return True
+
+        try:
+            user32.EnumWindows(enum, 0)
+        except Exception:
+            return ""
+        for t in titles:
+            if any(k in t.lower() for k in cls.SITE_NAMES):
+                return t
+        return ""  # no known site in any window title: do not guess from an unrelated tab
+
+    @classmethod
+    def _fallback_title(cls, app: str, aumid: str) -> tuple[str, str]:
+        """(title, artist) for a session with no metadata. Browsers: tab title without the browser suffix."""
+        import re
+        exe = {"Chrome": "chrome.exe", "Edge": "msedge.exe", "Firefox": "firefox.exe"}.get(app)
+        if not exe:
+            return "Playing", app
+        t = cls._browser_tab_title(exe)
+        t = re.sub(r"\s+[-–—]\s+(Google Chrome|Microsoft​? Edge|Mozilla Firefox).*$", "", t)
+        t = re.sub(r"^\(\d+\+?\)\s*", "", t)  # "(3) Facebook" -> "Facebook"
+        site = next((name for k, name in cls.SITE_NAMES.items() if k in t.lower()), "")
+        if not t or t.lower() == site.lower():
+            return (f"{site} video" if site else "Playing in " + app), app
+        return t, site or app
 
     async def _read(self):
         import unicodedata
@@ -718,6 +818,11 @@ class MediaSessions:
         dur = max(0.0, (tl.end_time - tl.start_time).total_seconds())
         nfc = lambda t: unicodedata.normalize("NFC", t or "")[:80]  # composed Vietnamese for the CYD font
         title, artist = nfc(props.title), nfc(props.artist)
+        app = self._app_name(s.source_app_user_model_id or "")
+        if not title.strip():  # e.g. Facebook videos in Chrome publish no metadata at all
+            title, fb_artist = self._fallback_title(app, s.source_app_user_model_id or "")
+            title, artist = nfc(title), artist or nfc(fb_artist)
+        title, artist = thai_marks(title), thai_marks(artist)
         art_id = ""
         if props.thumbnail:
             art_id = format(abs(hash((title, artist, s.source_app_user_model_id))) % (1 << 32), "08x")
@@ -725,7 +830,7 @@ class MediaSessions:
                 self.art = (art_id, await self._art_rgb565(props.thumbnail))
             if not self.art[1]:
                 art_id = ""
-        return {"app": self._app_name(s.source_app_user_model_id or ""), "title": title,
+        return {"app": app, "title": title,
                 "artist": artist, "playing": playing, "art_id": art_id,
                 "pos_s": int(min(pos, dur) if dur else pos), "dur_s": int(dur)}
 
@@ -740,7 +845,10 @@ class MediaSessions:
             stream = await ref.open_read_async()
             reader = DataReader(stream.get_input_stream_at(0))
             await reader.load_async(stream.size)
-            img = Image.open(io.BytesIO(bytes(reader.read_buffer(stream.size)))).convert("RGB")
+            img = Image.open(io.BytesIO(bytes(reader.read_buffer(stream.size))))
+            if self._is_app_icon(img):
+                return b""  # browser/app icon, not artwork -> the CYD shows its own music-note frame
+            img = img.convert("RGB")
             w, h = img.size  # crop to a centred square (YouTube thumbnails are 16:9)
             side = min(w, h)
             img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
@@ -752,6 +860,18 @@ class MediaSessions:
             return bytes(out)
         except Exception:
             return b""
+
+    @staticmethod
+    def _is_app_icon(img) -> bool:
+        """Chrome hands over its own logo (transparent background) when a site has no artwork; drawn as
+        RGB that becomes a logo in a black square. Treat small or partly transparent images as 'no art'."""
+        if min(img.size) < 96:
+            return True
+        if img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info):
+            alpha = img.convert("RGBA").getchannel("A")
+            clear = sum(alpha.histogram()[:128])
+            return clear > 0.05 * img.size[0] * img.size[1]
+        return False
 
     def art_bytes(self) -> tuple[str, bytes]:
         return self.art
@@ -793,6 +913,9 @@ class MediaSessions:
 
 class StatsServer(ThreadingHTTPServer):
     daemon_threads = True
+    # On Windows SO_REUSEADDR lets a second copy bind the same port; without it a second start fails
+    # cleanly, which ensure_server.py and the Startup shortcut rely on.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, addr, handler, store, args, token, exact=None):
         super().__init__(addr, handler)

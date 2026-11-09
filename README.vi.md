@@ -31,7 +31,7 @@ cung cấp dữ liệu cho CYD qua WiFi.
 | **Forecast** | 6 giờ tới và 3 ngày tới, kèm khả năng mưa |
 | **Claude Code** | % phiên 5 giờ, % tuần, token và chi phí quy đổi hôm nay, độ đầy ngữ cảnh của phiên đang chạy |
 | **Account** | Hạn mức chung của cả tài khoản Claude, kèm tỷ lệ dùng trong tuần theo Claude Code / Chats / Cowork |
-| **Music** | Bài đang phát (Spotify, YouTube trên Chrome/Edge…), ảnh bìa, nút lùi / phát / tới |
+| **Music** | Bài đang phát (Spotify, YouTube hay Facebook trên Chrome/Edge…), ảnh bìa bo góc, nút lùi / phát / tới; hiện được tên bài tiếng Việt và tiếng Thái |
 | **System** | Tải và nhiệt độ CPU, RAM, tải và nhiệt độ GPU, VRAM |
 | **Pomodoro** | Đếm giờ tập trung / nghỉ, nút − / + để chỉnh thời lượng mỗi lần 5 phút |
 | **Settings** | Âm thanh, chế độ thông báo, tốc độ slideshow, bật/tắt cảnh báo |
@@ -183,23 +183,30 @@ Sửa đường dẫn cho đúng máy bạn; trong JSON phải viết `\\` thay 
       "args": ["-I", "D:\\duong-dan\\cyd-desk-dashboard\\pc_server\\notify.py", "stop"] }] }],
     "Notification": [{ "hooks": [{ "type": "command", "async": true, "timeout": 5,
       "command": "C:\\Users\\<tên-bạn>\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-      "args": ["-I", "D:\\duong-dan\\cyd-desk-dashboard\\pc_server\\notify.py", "notification"] }] }]
+      "args": ["-I", "D:\\duong-dan\\cyd-desk-dashboard\\pc_server\\notify.py", "notification"] }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "async": true, "timeout": 10,
+      "command": "C:\\Users\\<tên-bạn>\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+      "args": ["-I", "D:\\duong-dan\\cyd-desk-dashboard\\pc_server\\ensure_server.py", "--plan", "pro"] }] }]
   }
 }
 ```
 
 Nếu file đã có sẵn nội dung khác, chỉ thêm phần `"hooks"` vào, đừng xoá phần cũ. Mở phiên Claude Code mới để hook có hiệu lực.
 
+Hook `SessionStart` bật server mỗi khi mở Claude Code nếu server chưa chạy (đang chạy rồi thì không làm gì).
+
 ### Bước 5. Cho server tự chạy khi bật máy
 1. Bấm **Win + R**, gõ `shell:startup`, Enter. Thư mục Startup sẽ mở ra.
 2. Chuột phải → **New → Shortcut**, dán (sửa đường dẫn cho đúng máy bạn):
 
    ```
-   "C:\Users\<tên-bạn>\AppData\Local\Programs\Python\Python311\pythonw.exe" "D:\duong-dan\cyd-desk-dashboard\pc_server\claude_usage_server.py" --plan pro --log "D:\duong-dan\cyd-desk-dashboard\pc_server\server.log"
+   "C:\Users\<tên-bạn>\AppData\Local\Programs\Python\Python311\pythonw.exe" -I "D:\duong-dan\cyd-desk-dashboard\pc_server\ensure_server.py" --plan pro
    ```
 3. Đặt tên shortcut, ví dụ "CYD server".
 
-`pythonw.exe` chạy ngầm, không hiện cửa sổ. Nhật ký nằm trong `server.log`. Muốn tắt tự chạy thì xoá shortcut đó.
+`ensure_server.py` chỉ bật server khi chưa có bản nào chạy, nên shortcut này và hook `SessionStart` ở bước 4 không
+bao giờ tạo ra hai bản. Các tuỳ chọn phía sau (`--plan pro`...) được chuyển nguyên cho server. Server chạy ngầm bằng
+`pythonw.exe`, không hiện cửa sổ; nhật ký nằm trong `pc_server\server.log`. Muốn tắt tự chạy thì xoá shortcut đó.
 
 ### Tuỳ chọn khác của server
 
@@ -272,7 +279,7 @@ Khi hết giờ, CYD báo, kêu bíp và tự chuyển sang tab Pomodoro. Sau 4 
 
 ```
 ESP32_tft_clock_weather/   firmware: file chính, net.ino (mạng), ui_build.ino (giao diện), ui_update.ino (cập nhật), font, icon
-pc_server/                 claude_usage_server.py (server), notify.py (hook Claude Code)
+pc_server/                 claude_usage_server.py (server), ensure_server.py (tự bật server), notify.py (hook Claude Code)
 config/                    lv_conf.h và User_Setup.h dùng cho bản build này
 docs/images/               ảnh chụp cho README
 tools/                     công cụ tạo font, đổi định dạng ảnh, icon gốc
@@ -281,7 +288,7 @@ tools/                     công cụ tạo font, đổi định dạng ảnh, i
 ## Ghi công
 
 - Ý tưởng và cấu trúc dữ liệu mức dùng Claude: [claudometer](https://github.com/krizdingus/claudometer) (MIT)
-- Font [Montserrat](https://github.com/JulietaUla/Montserrat) và [Fraunces](https://github.com/undercasetype/Fraunces), giấy phép SIL OFL 1.1
+- Font [Montserrat](https://github.com/JulietaUla/Montserrat), [Fraunces](https://github.com/undercasetype/Fraunces) và [Noto Sans Thai](https://github.com/notofonts/thai) (tên bài hát tiếng Thái), giấy phép SIL OFL 1.1
 - Thời tiết và chất lượng không khí: [Open-Meteo](https://open-meteo.com/)
 - Icon thời tiết: từ bài hướng dẫn CYD + LVGL weather station của Random Nerd Tutorials
 - Thuật toán âm lịch: Hồ Ngọc Đức

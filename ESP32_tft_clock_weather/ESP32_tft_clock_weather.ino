@@ -72,6 +72,7 @@
 #define TOAST_MS                 25000UL   // the thong bao tu an sau 25s (hoac tap de an)
 #define BEACON_PORT               7843     // PC server phat UDP: tim IP + bao su kien Claude
 #define ART_SIZE                    80     // anh bia album 80x80 RGB565 (server da thu nho san)
+#define ART_RADIUS                  10     // bo goc anh bia (to mau nen vao 4 goc ngay khi tai ve)
 
 // Bao ve khi chay 24/7
 #define NET_STALL_RESTART_MS    180000UL   // task mang dung > 3 phut -> khoi dong lai

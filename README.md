@@ -26,7 +26,7 @@ what's playing on my PC, PC temperatures, and a Pomodoro timer. A small Python s
 | **Weather / Forecast** | Temperature, feels-like, humidity, wind, US AQI; next 6 hours and 3 days (Open-Meteo) |
 | **Claude Code** | 5-hour session %, weekly %, tokens and API-equivalent cost today, context window of the active session |
 | **Claude Account** | Account-wide limits plus this week's usage split by app (Claude Code / Chats / Cowork) |
-| **Music** | Now playing from any Windows app (Spotify, YouTube in Chrome…), 80×80 album art, prev / play / next |
+| **Music** | Now playing from any Windows app (Spotify, YouTube or Facebook in Chrome…), 80×80 rounded album art, prev / play / next; Vietnamese and Thai titles |
 | **System** | CPU load and temperature, RAM, GPU load and temperature, VRAM |
 | **Pomodoro** | Adjustable focus / break lengths, saved across reboots |
 | **Settings** | Sound, notification mode, slideshow speed, alerts |
@@ -53,11 +53,13 @@ flowchart LR
   low-memory restart for 24/7 use.
 - **PC server** – single-file Python (standard library, plus `winrt` for media). Serves `GET /v1/stats` in the
   [claudometer](https://github.com/krizdingus/claudometer) schema, reads exact usage from Anthropic's OAuth usage
-  endpoint (falls back to estimates from local logs), and only measures PC sensors while the device shows that tab.
+  endpoint (falls back to estimates from local logs). `ensure_server.py` starts it at login and whenever Claude Code
+  starts, and does nothing if it is already running.
   Measured cost: about 0.015 % CPU and 38 MB RAM in the busiest case.
 - **Discovery** – the server broadcasts its address over UDP, so the device follows the laptop when its IP changes.
 - **Typography** – Montserrat and Fraunces converted to LVGL bitmap fonts by a small Pillow-based converter
-  (`tools/make_lvgl_font.py`), including Vietnamese diacritics.
+  (`tools/make_lvgl_font.py`), including Vietnamese diacritics. Song titles fall back to Noto Sans Thai for Thai
+  script; LVGL does no Thai shaping, so the server swaps in raised tone marks where they would hit an upper vowel.
 
 ## Tech
 
@@ -67,7 +69,7 @@ ESP32 · C++ / Arduino · LVGL 9 · FreeRTOS · TFT_eSPI · XPT2046 · ArduinoJs
 
 ```
 ESP32_tft_clock_weather/   firmware (main sketch, net.ino, ui_build.ino, ui_update.ino, fonts, icons)
-pc_server/                 claude_usage_server.py, notify.py (Claude Code hook)
+pc_server/                 claude_usage_server.py, ensure_server.py (autostart), notify.py (Claude Code hook)
 config/                    lv_conf.h and TFT_eSPI User_Setup.h used for this build
 tools/                     font converter, image converter, original icons
 ```
@@ -85,7 +87,7 @@ The touch calibration in `ui_build.ino` (`TOUCH_RAW_*`) was measured on my panel
 ## Credits
 
 - Claude usage idea and JSON schema: [claudometer](https://github.com/krizdingus/claudometer) (MIT)
-- Fonts: [Montserrat](https://github.com/JulietaUla/Montserrat) and [Fraunces](https://github.com/undercasetype/Fraunces), SIL Open Font License 1.1
+- Fonts: [Montserrat](https://github.com/JulietaUla/Montserrat), [Fraunces](https://github.com/undercasetype/Fraunces) and [Noto Sans Thai](https://github.com/notofonts/thai), SIL Open Font License 1.1
 - Weather and air quality: [Open-Meteo](https://open-meteo.com/)
 - Weather icons: from the Random Nerd Tutorials CYD + LVGL weather station example
 - Lunar calendar algorithm: Hồ Ngọc Đức
