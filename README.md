@@ -4,7 +4,7 @@ A desk companion built on the **ESP32 "Cheap Yellow Display"** (ESP32-2432S028R,
 It shows the time with the Vietnamese lunar calendar, live weather and air quality, **Claude Code / Claude account usage**,
 what's playing on my PC, PC temperatures, and a Pomodoro timer. A small Python server on the laptop feeds it data.
 
-*Tiếng Việt: [README.vi.md](README.vi.md)*
+> 🇻🇳 **Tiếng Việt:** hướng dẫn cài đặt và sử dụng chi tiết ở [README.vi.md](README.vi.md).
 
 ![CYD dashboard on the desk](docs/images/desk.jpg)
 
