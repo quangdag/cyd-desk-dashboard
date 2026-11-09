@@ -6,8 +6,16 @@ what's playing on my PC, PC temperatures, and a Pomodoro timer. A small Python s
 
 *Tiếng Việt: [README.vi.md](README.vi.md)*
 
-<!-- Add photos to docs/images/ and they show up here -->
-<!-- ![Home](docs/images/home.jpg) ![Claude Code](docs/images/claude.jpg) -->
+![CYD dashboard on the desk](docs/images/desk.jpg)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Home launcher](docs/images/home.jpg) **Home** – launcher with live values | ![Claude Code usage](docs/images/claude.jpg) **Claude Code** – session, week, today, context |
+| ![Now playing](docs/images/music.jpg) **Music** – now playing with album art | ![Clock with lunar date](docs/images/clock.jpg) **Clock** – with the Vietnamese lunar date |
+| ![Weather](docs/images/weather.jpg) **Weather** – with US AQI | ![Forecast](docs/images/forecast.jpg) **Forecast** – next 6 hours and 3 days |
+| ![Settings](docs/images/settings.jpg) **Settings** – sound, notifications, slideshow, alerts | |
 
 ## Features
 

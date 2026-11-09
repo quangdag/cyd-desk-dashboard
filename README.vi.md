@@ -29,8 +29,14 @@ Một giao diện LCD **ESP32 CYD** (ESP32-2432S028R, 2.8" ILI9341 + cảm ứng
 ---
 
 ## 📸 Giao diện chính (Main Interface)
-![z6675923609791_7ed76e9d6b3eff1e5c8630ac3c778c00](https://github.com/user-attachments/assets/90dbaeac-5456-43d3-a457-464e2ec63457)
-![z6675923586984_0091994fcaee301bc336a025477702ad](https://github.com/user-attachments/assets/be5b750a-a226-4d9b-ac6b-4d61fd2e34d8)
+
+![CYD trên bàn làm việc](docs/images/desk.jpg)
+
+| | |
+|---|---|
+| ![Home](docs/images/home.jpg) | ![Claude Code](docs/images/claude.jpg) |
+| ![Music](docs/images/music.jpg) | ![Clock](docs/images/clock.jpg) |
+| ![Weather](docs/images/weather.jpg) | ![Forecast](docs/images/forecast.jpg) |
 
 ## 📂 Cách sử dụng (How to Use)
 
