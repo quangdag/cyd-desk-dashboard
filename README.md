@@ -81,6 +81,5 @@ The touch calibration in `ui_build.ino` (`TOUCH_RAW_*`) was measured on my panel
 - Weather and air quality: [Open-Meteo](https://open-meteo.com/)
 - Weather icons: from the Random Nerd Tutorials CYD + LVGL weather station example
 - Lunar calendar algorithm: Hồ Ngọc Đức
-- Built with help from Claude Code
 
 License: [MIT](LICENSE). Third-party files: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
