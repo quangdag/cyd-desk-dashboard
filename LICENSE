@@ -19,9 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-Third-party files keep their own licenses:
-- Fonts in ESP32_tft_clock_weather/src/fonts and tools/fonts: SIL Open Font License 1.1
-  (OFL-Montserrat.txt, OFL-Fraunces.txt)
-- config/lv_conf.h: LVGL template (MIT); config/User_Setup.h: TFT_eSPI setup file (FreeBSD)
