@@ -526,6 +526,22 @@ def compute_stats(store: LogStore, args, exact: ExactUsage | None = None) -> dic
     }
 
 
+def user_idle_seconds() -> float:
+    """Seconds since the last mouse/keyboard input on this PC (0 if unknown / not Windows)."""
+    if os.name != "nt":
+        return 0.0
+    import ctypes
+
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+    lii = LASTINPUTINFO()
+    lii.cbSize = ctypes.sizeof(lii)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+        return 0.0
+    return max(0, (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) & 0xFFFFFFFF) / 1000
+
+
 # ---- PC stats (only measured while the CYD shows its PC page) ----------------
 
 class ThermalZone:
@@ -669,6 +685,7 @@ class MediaSessions:
     def __init__(self):
         self.lock = threading.Lock()
         self.cached = (0.0, None)
+        self.art = ("", b"")          # (art_id, 80x80 RGB565 bytes) of the current track
         try:
             from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as mm
             self.mm = mm
@@ -700,9 +717,44 @@ class MediaSessions:
             pos += max(0.0, (datetime.now(tl.last_updated_time.tzinfo) - tl.last_updated_time).total_seconds())
         dur = max(0.0, (tl.end_time - tl.start_time).total_seconds())
         nfc = lambda t: unicodedata.normalize("NFC", t or "")[:80]  # composed Vietnamese for the CYD font
-        return {"app": self._app_name(s.source_app_user_model_id or ""), "title": nfc(props.title),
-                "artist": nfc(props.artist), "playing": playing,
+        title, artist = nfc(props.title), nfc(props.artist)
+        art_id = ""
+        if props.thumbnail:
+            art_id = format(abs(hash((title, artist, s.source_app_user_model_id))) % (1 << 32), "08x")
+            if art_id != self.art[0]:
+                self.art = (art_id, await self._art_rgb565(props.thumbnail))
+            if not self.art[1]:
+                art_id = ""
+        return {"app": self._app_name(s.source_app_user_model_id or ""), "title": title,
+                "artist": artist, "playing": playing, "art_id": art_id,
                 "pos_s": int(min(pos, dur) if dur else pos), "dur_s": int(dur)}
+
+    ART_SIZE = 80
+
+    async def _art_rgb565(self, ref) -> bytes:
+        """Album art -> 80x80 RGB565 little-endian (what LVGL draws directly; no JPEG/PNG decoder on the CYD)."""
+        import io
+        try:
+            from winrt.windows.storage.streams import DataReader
+            from PIL import Image
+            stream = await ref.open_read_async()
+            reader = DataReader(stream.get_input_stream_at(0))
+            await reader.load_async(stream.size)
+            img = Image.open(io.BytesIO(bytes(reader.read_buffer(stream.size)))).convert("RGB")
+            w, h = img.size  # crop to a centred square (YouTube thumbnails are 16:9)
+            side = min(w, h)
+            img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
+            img = img.resize((self.ART_SIZE, self.ART_SIZE), Image.LANCZOS)
+            out = bytearray()
+            for r, g, b in img.getdata():
+                v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+                out += bytes((v & 0xFF, v >> 8))
+            return bytes(out)
+        except Exception:
+            return b""
+
+    def art_bytes(self) -> tuple[str, bytes]:
+        return self.art
 
     def get(self):
         if not self.mm:
@@ -752,10 +804,11 @@ class StatsServer(ThreadingHTTPServer):
         self.event = None          # last Claude Code hook event
         self.event_id = 0
 
-    def push_event(self, kind: str, project: str, message: str):
+    def push_event(self, kind: str, project: str, message: str, duration_s: int = -1):
         self.event_id += 1
+        # idle_s: how long you've been away from mouse/keyboard -> the CYD can stay quiet while you're at the PC
         self.event = {"id": self.event_id, "type": kind, "project": project[:40], "message": message[:120],
-                      "ts": time.time()}
+                      "duration_s": int(duration_s), "idle_s": int(user_idle_seconds()), "ts": time.time()}
         print(f"{datetime.now():%H:%M:%S} event {kind} {project!r}", file=sys.stderr)
         if not self.args.no_beacon:  # tell the CYD right away instead of waiting for its next poll
             threading.Thread(target=broadcast, args=(f"CLAUDE_EVENT {self.event_id}".encode(), 2), daemon=True).start()
@@ -796,6 +849,19 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/v1/status":
             return self._send(200, {"version": VERSION, "paired_count": 1, "pending_code": ""})
+        if url.path == "/v1/media/art":  # 80x80 RGB565 album art of the current track
+            if self.server.token and not self._authorized():
+                return self._send(401, {"error": "unauthorized"})
+            art_id, data = self.server.media.art_bytes()
+            if not data:
+                return self._send(404, {"error": "no art"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Art-Id", art_id)
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if url.path != "/v1/stats":
             return self._send(404, {"error": "not found"})
         if self.server.token and not self._authorized():
@@ -829,7 +895,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/media":
             return self._send(200, {"ok": self.server.media.control(str(body.get("action") or ""))})
         kind = body.get("type") if body.get("type") in ("stop", "notification") else "stop"
-        self.server.push_event(kind, str(body.get("project") or ""), str(body.get("message") or ""))
+        try:
+            duration = int(body.get("duration_s", -1))
+        except (TypeError, ValueError):
+            duration = -1
+        self.server.push_event(kind, str(body.get("project") or ""), str(body.get("message") or ""), duration)
         return self._send(200, {"ok": True, "id": self.server.event_id})
 
     def log_message(self, fmt, *args):

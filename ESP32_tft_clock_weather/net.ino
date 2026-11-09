@@ -1,0 +1,366 @@
+// =========================
+// NETWORK (task rieng tren core 0, khong bao gio goi LVGL o day)
+// WiFi, thoi tiet + AQI (Open-Meteo), PC server (Claude, PC, nhac, anh bia), UDP beacon
+// =========================
+
+static bool http_get_json(const String& url, JsonDocument& doc, const char* bearer, int timeout_ms) {
+  HTTPClient http;
+  http.setConnectTimeout(timeout_ms);
+  http.setTimeout(timeout_ms);
+  if (!http.begin(url)) return false;
+  if (bearer) http.addHeader("Authorization", String("Bearer ") + bearer);
+  int code = http.GET();
+  bool ok = false;
+  if (code == HTTP_CODE_OK) {
+    DeserializationError err = deserializeJson(doc, http.getString());
+    ok = !err;
+    if (err) Serial.printf("JSON error %s: %s\n", err.c_str(), url.c_str());
+  } else {
+    Serial.printf("HTTP %d: %s\n", code, url.substring(0, 60).c_str());
+  }
+  http.end();
+  return ok;
+}
+
+static bool http_post_json(const String& url, const String& body, const char* bearer) {
+  HTTPClient http;
+  http.setConnectTimeout(HTTP_TIMEOUT_MS);
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(url)) return false;
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + bearer);
+  int code = http.POST(body);
+  http.end();
+  return code == HTTP_CODE_OK;
+}
+
+// Thoi tiet hien tai + 6 gio toi + 3 ngay (mot request Open-Meteo)
+static bool fetch_weather() {
+  String url = String("http://api.open-meteo.com/v1/forecast?latitude=") + LATITUDE + "&longitude=" + LONGITUDE +
+               "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,is_day,wind_speed_10m" +
+               "&hourly=temperature_2m,precipitation_probability,weather_code,is_day&forecast_hours=8" +
+               "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=3" +
+               "&temperature_unit=" + TEMP_UNIT_PARAM + "&timezone=auto";
+  JsonDocument doc;
+  if (!http_get_json(url, doc, nullptr, HTTP_TIMEOUT_MS)) return false;
+  JsonObjectConst cur = doc["current"];
+  if (cur.isNull()) return false;
+
+  WeatherData w;
+  w.valid = true;
+  w.temperature = cur["temperature_2m"] | 0.0f;
+  w.feels = cur["apparent_temperature"] | 0.0f;
+  w.wind = cur["wind_speed_10m"] | 0.0f;
+  w.humidity = cur["relative_humidity_2m"] | 0;   // do am HIEN TAI
+  w.weather_code = cur["weather_code"] | -1;
+  w.is_day = (cur["is_day"] | 1) != 0;
+  const char* now_time = cur["time"] | "";          // "2026-11-09T19:45" (gio dia phuong)
+  const char* tp = strchr(now_time, 'T');
+  if (tp) strlcpy(w.last_update, tp + 1, sizeof(w.last_update));
+
+  JsonObjectConst h = doc["hourly"];
+  JsonArrayConst ht = h["time"];
+  for (size_t i = 0; i < ht.size() && w.n_hours < 6; i++) {
+    const char* t = ht[i] | "";
+    if (strcmp(t, now_time) <= 0) continue;          // chi lay cac gio sau hien tai
+    HourFc& f = w.hours[w.n_hours++];
+    snprintf(f.hour, sizeof(f.hour), "%.2sh", strlen(t) > 12 ? t + 11 : "--");
+    f.temp = h["temperature_2m"][i] | 0.0f;
+    f.code = h["weather_code"][i] | -1;
+    f.day = (h["is_day"][i] | 1) != 0;
+    f.rain = h["precipitation_probability"][i] | 0;
+  }
+
+  JsonObjectConst d = doc["daily"];
+  JsonArrayConst dt = d["time"];
+  for (size_t i = 0; i < dt.size() && w.n_days < 3; i++) {
+    int y = 0, m = 0, dd = 0;
+    sscanf(dt[i] | "", "%d-%d-%d", &y, &m, &dd);
+    DayFc& f = w.days[w.n_days++];
+    f.wday = weekday_of(y, m, dd);
+    f.tmin = d["temperature_2m_min"][i] | 0.0f;
+    f.tmax = d["temperature_2m_max"][i] | 0.0f;
+    f.code = d["weather_code"][i] | -1;
+    f.rain = d["precipitation_probability_max"][i] | 0;
+  }
+
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  shared_weather = w;
+  weather_dirty = true;
+  xSemaphoreGive(data_mutex);
+  Serial.println("Weather updated");
+  return true;
+}
+
+static bool fetch_aqi() {
+  String url = String("http://air-quality-api.open-meteo.com/v1/air-quality?latitude=") + LATITUDE +
+               "&longitude=" + LONGITUDE + "&current=us_aqi,pm2_5&timezone=auto";
+  JsonDocument doc;
+  if (!http_get_json(url, doc, nullptr, AQI_TIMEOUT_MS)) return false;
+  JsonObjectConst cur = doc["current"];
+  if (cur.isNull() || cur["us_aqi"].isNull()) return false;
+  AqiData a;
+  a.valid = true;
+  a.aqi = cur["us_aqi"] | 0;
+  a.pm25 = cur["pm2_5"] | 0.0f;
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  shared_aqi = a;
+  aqi_dirty = true;
+  xSemaphoreGive(data_mutex);
+  Serial.printf("AQI updated: %d\n", a.aqi);
+  return true;
+}
+
+// Dia chi server hien tai: mac dinh tu secrets.h, cap nhat khi nghe thay beacon (chi task mang dung)
+static char claude_host[16];
+static uint16_t claude_port = CLAUDE_PORT;
+static WiFiUDP beacon_udp;
+static bool beacon_listening = false;
+
+static String server_url(const char* path) { return String("http://") + claude_host + ":" + claude_port + path; }
+
+// UDP tu PC: "CLAUDE_USAGE 1 <port>" (tim IP) hoac "CLAUDE_EVENT <id>" (Claude Code vua xong / dang cho)
+// Tra ve true neu can lay so lieu ngay
+static bool check_beacon() {
+  bool poll = false;
+  int len;
+  while ((len = beacon_udp.parsePacket()) > 0) {
+    char msg[48];
+    len = beacon_udp.read(msg, sizeof(msg) - 1);
+    if (len <= 0) continue;
+    msg[len] = '\0';
+    int port = 0, ev = 0;
+    String ip = beacon_udp.remoteIP().toString();
+    if (sscanf(msg, "CLAUDE_USAGE 1 %d", &port) == 1 && port > 0 && port <= 65535) {
+      if (ip != claude_host || port != claude_port) {
+        strlcpy(claude_host, ip.c_str(), sizeof(claude_host));
+        claude_port = port;
+        Serial.printf("Claude server found at %s:%d\n", claude_host, claude_port);
+        poll = true;
+      }
+    } else if (sscanf(msg, "CLAUDE_EVENT %d", &ev) == 1 && ip == claude_host) {
+      poll = true;  // su kien moi -> lay ngay, khong doi lan poll ke tiep
+    }
+  }
+  return poll;
+}
+
+// Giao thuc claudometer: GET /v1/stats, Bearer token, schema 1 (+ event, context, account, pc, media)
+static bool fetch_claude(ScreenState scr) {
+  String screens = "home";
+  if (scr == SCR_PC) screens += ",pc";
+  if (scr == SCR_MUSIC) screens += ",media";
+  JsonDocument doc;
+  bool ok = http_get_json(server_url("/v1/stats?screens=") + screens, doc, CLAUDE_TOKEN, HTTP_TIMEOUT_MS) &&
+            (doc["schema"] | 0) == 1;
+  if (!ok) {
+    xSemaphoreTake(data_mutex, portMAX_DELAY);
+    if (!shared_claude.stale) { shared_claude.stale = true; claude_dirty = true; }
+    xSemaphoreGive(data_mutex);
+    return false;
+  }
+
+  static ClaudeData c;  // static: struct ~1 KB, tranh day stack task mang
+  c = ClaudeData();
+  c.valid = true;
+  c.exact = strcmp(doc["source"] | "", "exact") == 0;
+  JsonObjectConst s = doc["session"];
+  c.session_pct = s["pct_used"] | 0;
+  c.minutes_remaining = s["minutes_remaining"] | 0;
+  strlcpy(c.resets_at, s["resets_at"] | "", sizeof(c.resets_at));
+  JsonObjectConst b = doc["budgets"];
+  c.week_pct = b["code_all"] | 0;
+  strlcpy(c.week_resets_in, b["resets_in"] | "", sizeof(c.week_resets_in));
+  strlcpy(c.plan, b["plan"] | "", sizeof(c.plan));
+  JsonObjectConst m = doc["models_today"];
+  c.today_tokens = m["total_tokens"] | 0L;
+  c.today_cost = m["est_cost_usd"] | 0.0f;
+
+  JsonObjectConst ctx = doc["context"];
+  if (!ctx.isNull()) {
+    c.ctx_tokens = ctx["tokens"] | 0L;
+    c.ctx_limit = ctx["limit"] | 0L;
+  }
+
+  JsonArrayConst rows = doc["account"]["breakdown"];
+  if (!rows.isNull()) {
+    c.account.valid = true;
+    for (JsonObjectConst r : rows) {
+      if (c.account.n >= 4) break;
+      strlcpy(c.account.name[c.account.n], r["name"] | "", sizeof(c.account.name[0]));
+      c.account.pct[c.account.n] = r["percent"] | 0;
+      c.account.n++;
+    }
+  }
+
+  JsonObjectConst ev = doc["event"];
+  if (!ev.isNull()) {
+    c.event_id = ev["id"] | 0;
+    c.event_age = ev["age_s"] | 0;
+    c.event_idle = ev["idle_s"] | 0;
+    c.event_duration = ev["duration_s"] | -1;
+    strlcpy(c.event_type, ev["type"] | "", sizeof(c.event_type));
+    strlcpy(c.event_project, ev["project"] | "", sizeof(c.event_project));
+    strlcpy(c.event_msg, ev["message"] | "", sizeof(c.event_msg));
+  }
+
+  JsonObjectConst pc = doc["pc"];
+  if (!pc.isNull()) {
+    c.pc.valid = true;
+    c.pc.cpu = pc["cpu_pct"].isNull() ? -1 : (int)(pc["cpu_pct"] | 0);
+    c.pc.cpu_temp = pc["cpu_temp_c"].isNull() ? -1 : (int)(pc["cpu_temp_c"] | 0);
+    c.pc.ram_pct = pc["ram"]["pct"] | 0;
+    c.pc.ram_used = pc["ram"]["used_gb"] | 0.0f;
+    c.pc.ram_total = pc["ram"]["total_gb"] | 0.0f;
+    JsonObjectConst g = pc["gpu"];
+    if (!g.isNull()) {
+      c.pc.gpu = true;
+      c.pc.gpu_temp = g["temp_c"] | 0;
+      c.pc.gpu_util = g["util_pct"] | 0;
+      c.pc.vram_used = g["mem_used_gb"] | 0.0f;
+      c.pc.vram_total = g["mem_total_gb"] | 0.0f;
+    }
+  }
+
+  bool media_asked = scr == SCR_MUSIC;
+  JsonVariantConst md = doc["media"];
+  if (media_asked) {
+    c.media.valid = true;
+    c.media.rx_ms = millis();
+    if (md.is<JsonObjectConst>()) {
+      strlcpy(c.media.error, md["error"] | "", sizeof(c.media.error));
+      c.media.has = !c.media.error[0];
+      strlcpy(c.media.app, md["app"] | "", sizeof(c.media.app));
+      strlcpy(c.media.title, md["title"] | "", sizeof(c.media.title));
+      strlcpy(c.media.artist, md["artist"] | "", sizeof(c.media.artist));
+      strlcpy(c.media.art_id, md["art_id"] | "", sizeof(c.media.art_id));
+      c.media.playing = md["playing"] | false;
+      c.media.pos_s = md["pos_s"] | 0;
+      c.media.dur_s = md["dur_s"] | 0;
+    }
+  }
+
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  if (!c.pc.valid) c.pc = shared_claude.pc;          // tab khac khong hoi PC -> giu so cu
+  if (!media_asked) c.media = shared_claude.media;   // tuong tu cho nhac
+  if (!c.account.valid) c.account = shared_claude.account;
+  shared_claude = c;
+  claude_dirty = true;
+  xSemaphoreGive(data_mutex);
+  return true;
+}
+
+// Anh bia: tai 80x80 RGB565 (12.8 KB) vao bo dem khong dang hien thi, roi bao UI doi
+static void fetch_album_art() {
+  char want[12];
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  strlcpy(want, shared_claude.media.art_id, sizeof(want));
+  xSemaphoreGive(data_mutex);
+  if (art_dirty || strcmp(want, art_loaded_id) == 0) return;  // UI chua nhan anh truoc, hoac anh khong doi
+  if (!want[0]) {                                             // bai moi khong co anh bia
+    art_front = -1;
+    art_loaded_id[0] = '\0';
+    art_dirty = true;
+    return;
+  }
+  int back = art_front == 0 ? 1 : 0;
+  HTTPClient http;
+  http.setConnectTimeout(HTTP_TIMEOUT_MS);
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(server_url("/v1/media/art"))) return;
+  http.addHeader("Authorization", String("Bearer ") + CLAUDE_TOKEN);
+  const size_t need = sizeof(art_buf[0]);
+  bool ok = false;
+  if (http.GET() == HTTP_CODE_OK && http.getSize() == (int)need) {
+    WiFiClient* st = http.getStreamPtr();
+    size_t got = 0;
+    uint32_t t0 = millis();
+    while (got < need && millis() - t0 < (uint32_t)HTTP_TIMEOUT_MS) {
+      int n = st->available();
+      if (n > 0) got += st->readBytes(art_buf[back] + got, min((size_t)n, need - got));
+      else vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ok = got == need;
+  }
+  http.end();
+  if (!ok) return;
+  strlcpy(art_loaded_id, want, sizeof(art_loaded_id));
+  art_front = back;
+  art_dirty = true;
+}
+
+void network_task(void*) {
+  uint32_t next_wifi_retry = millis() + WIFI_RETRY_INTERVAL;
+  uint32_t next_weather = 0, next_aqi = 0, next_claude = 0;
+  uint32_t claude_backoff = CLAUDE_BACKOFF_START;
+  int aqi_fails = 0;
+  strlcpy(claude_host, CLAUDE_HOST, sizeof(claude_host));
+
+  for (;;) {
+    uint32_t now = millis();
+    net_heartbeat = now;
+
+    if (WiFi.status() != WL_CONNECTED) {
+      if (beacon_listening) { beacon_udp.stop(); beacon_listening = false; }
+      if (due(now, next_wifi_retry)) {
+        Serial.println("WiFi disconnected, reconnecting...");
+        WiFi.reconnect();
+        next_wifi_retry = now + WIFI_RETRY_INTERVAL;
+      }
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
+    next_wifi_retry = now + WIFI_RETRY_INTERVAL;
+
+    // NTP chi bat sau khi WiFi len: goi configTzTime qua som lam lwIP assert (ESP32 core 3.x)
+    static bool ntp_started = false;
+    if (!ntp_started) {
+      configTzTime(TIMEZONE, NTP_SERVER);
+      ntp_started = true;
+    }
+
+    if (claude_enabled()) {
+      if (!beacon_listening) beacon_listening = beacon_udp.begin(BEACON_PORT);
+      if (beacon_listening && check_beacon()) {
+        claude_backoff = CLAUDE_BACKOFF_START;
+        next_claude = now;
+      }
+      int act = media_action;
+      if (act) {  // nut Music: gui lenh roi lay trang thai moi
+        media_action = 0;
+        const char* name = act == 1 ? "toggle" : act == 2 ? "next" : "prev";
+        http_post_json(server_url("/v1/media"), String("{\"action\":\"") + name + "\"}", CLAUDE_TOKEN);
+        vTaskDelay(pdMS_TO_TICKS(300));  // de app nhac kip doi bai / trang thai
+        next_claude = millis();
+      }
+      if (claude_poll_now) { claude_poll_now = false; next_claude = now; }
+      if (due(millis(), next_claude)) {
+        ScreenState scr = current_screen;
+        if (fetch_claude(scr)) {
+          claude_backoff = CLAUDE_BACKOFF_START;
+          uint32_t iv = scr == SCR_MUSIC ? MEDIA_POLL_ACTIVE : scr == SCR_PC ? PC_POLL_ACTIVE
+                      : (scr == SCR_CLAUDE || scr == SCR_ACCOUNT) ? CLAUDE_POLL_ACTIVE : CLAUDE_POLL_IDLE;
+          next_claude = millis() + iv;
+          if (scr == SCR_MUSIC) fetch_album_art();
+        } else {
+          next_claude = millis() + claude_backoff;
+          claude_backoff = min<uint32_t>(claude_backoff * 2, CLAUDE_BACKOFF_MAX);
+        }
+      }
+    }
+
+    if (due(now, next_weather)) {
+      next_weather = millis() + (fetch_weather() ? WEATHER_UPDATE_INTERVAL : NET_RETRY_INTERVAL);
+    }
+    if (due(now, next_aqi)) {
+      if (fetch_aqi()) {
+        aqi_fails = 0;
+        next_aqi = millis() + AQI_UPDATE_INTERVAL;
+      } else {  // lan loi dau thu lai sau 10s, sau do 60s
+        next_aqi = millis() + (aqi_fails++ == 0 ? AQI_QUICK_RETRY : NET_RETRY_INTERVAL);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
