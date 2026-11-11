@@ -44,7 +44,7 @@
 // =========================
 // CONFIG
 // =========================
-#define FW_VERSION "2.0.0"
+#define FW_VERSION "2.0.2"
 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
