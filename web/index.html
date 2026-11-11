@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CYD Desk Dashboard – install</title>
+<meta name="description" content="Flash the CYD Desk Dashboard firmware to an ESP32-2432S028R from your browser.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.0.1/dist/web/install-button.js?module"></script>
+<style>
+  :root { --bg: #F5F0E8; --tile: #EBE3D6; --ink: #2B2722; --muted: #8C8173; --accent: #C15F3C; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+  .caps { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); margin: 0 0 6px; }
+  h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 400; font-size: 40px; line-height: 1.15; margin: 0 0 12px; }
+  .lede { color: var(--muted); margin: 0 0 28px; max-width: 560px; }
+  .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: center; }
+  .hero img { width: 100%; border-radius: 12px; image-rendering: pixelated; border: 6px solid #E8743B; }
+  esp-web-install-button button[slot="activate"] { font: inherit; font-size: 17px; padding: 14px 28px; border: 0;
+    border-radius: 12px; background: var(--accent); color: var(--bg); cursor: pointer; }
+  .note { font-size: 14px; color: var(--muted); margin-top: 10px; }
+  ol { padding-left: 22px; }
+  li { margin: 8px 0; }
+  code { background: var(--tile); padding: 1px 6px; border-radius: 6px; font-size: 14px; }
+  h2 { font-family: Georgia, serif; font-weight: 400; font-size: 24px; margin: 40px 0 8px; }
+  a { color: var(--accent); }
+  footer { margin-top: 48px; font-size: 14px; color: var(--muted); }
+  @media (max-width: 640px) { .hero { grid-template-columns: 1fr; } h1 { font-size: 32px; } }
+</style>
+</head>
+<body>
+<main>
+  <p class="caps">ESP32-2432S028R · 2.8" CYD</p>
+  <div class="hero">
+    <div>
+      <h1>CYD Desk Dashboard</h1>
+      <p class="lede">Clock with the Vietnamese lunar calendar, weather and air quality, Claude Code usage,
+        now playing, PC temperatures and a Pomodoro timer – on a $15 touchscreen.</p>
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Install on my CYD</button>
+        <span slot="unsupported">Your browser can't talk to USB devices. Open this page in Chrome or Edge on a computer.</span>
+        <span slot="not-allowed">This page needs HTTPS to use USB.</span>
+      </esp-web-install-button>
+      <p class="note">Chrome or Edge on a computer · takes about a minute</p>
+    </div>
+    <img src="demo.gif" alt="The dashboard cycling through its pages" width="640" height="480">
+  </div>
+
+  <h2>Install</h2>
+  <ol>
+    <li>Plug the CYD into your computer with a USB cable.</li>
+    <li>Press <b>Install on my CYD</b> and pick its port (CH340 / USB serial).</li>
+    <li>When it restarts, the screen shows <b>Wi-Fi setup</b>. On your phone, join the Wi-Fi <code>CYD-Setup</code>;
+      the setup page opens by itself (or go to <code>192.168.4.1</code>).</li>
+    <li>Enter your Wi-Fi, the PC server token (optional) and your location for the weather. Save – done.</li>
+  </ol>
+  <p>Clock, lunar date, weather, forecast and Pomodoro work on their own. Claude usage, now playing, PC stats,
+    notifications and approving Claude Code from the desk need the small PC server –
+    see the <a href="https://github.com/quangdag/cyd-desk-dashboard#build">README</a>
+    (<a href="https://github.com/quangdag/cyd-desk-dashboard/blob/main/README.vi.md">tiếng Việt</a>).</p>
+
+  <h2>Change Wi-Fi later</h2>
+  <p>Home → gear → <b>Wi-Fi setup</b>. Your settings stay on the device; installing again with “erase” clears them.</p>
+
+  <footer>Open source, MIT · <a href="https://github.com/quangdag/cyd-desk-dashboard">github.com/quangdag/cyd-desk-dashboard</a></footer>
+</main>
+</body>
+</html>

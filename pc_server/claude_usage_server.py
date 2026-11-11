@@ -13,8 +13,9 @@ Run:
     python claude_usage_server.py --plan max-5x
     python claude_usage_server.py --print        # print one JSON snapshot and exit
 
-The bearer token is read from ../ESP32_tft_clock_weather/secrets.h
-(CLAUDE_TOKEN) unless --token or CLAUDE_USAGE_TOKEN is given.
+The bearer token comes from --token / CLAUDE_USAGE_TOKEN, else CLAUDE_TOKEN in
+../ESP32_tft_clock_weather/secrets.h, else token.txt next to this file (created with a
+random token on first start - type it into the CYD's Wi-Fi setup page).
 
 All percentages are ESTIMATES: Anthropic does not publish token caps, and
 these caps were reverse-derived by claudometer. Tune with --session-cap /
@@ -34,9 +35,10 @@ import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import unicodedata
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # (session block tokens, weekly all-models, weekly opus-only) - from claudometer planinfo.go
 PLAN_CAPS = {
@@ -539,6 +541,328 @@ def user_idle_seconds() -> float:
     return max(0, (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) & 0xFFFFFFFF) / 1000
 
 
+def workstation_locked() -> bool:
+    """True while Windows shows the lock screen (the input desktop is not the user's "Default" one)."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    user32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                 wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    h = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP; fails on the secure desktop
+    if not h:
+        return True
+    try:
+        buf, need = ctypes.create_unicode_buffer(64), wintypes.DWORD()
+        if user32.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need)):  # UOI_NAME
+            return buf.value.lower() != "default"
+        return False
+    finally:
+        user32.CloseDesktop(h)
+
+
+# ---- Calendar: next event from an iCalendar (.ics) feed -----------------------
+
+class Calendar:
+    """Reads an .ics URL (e.g. Google Calendar's "secret address in iCal format") or file every 10 min
+    and answers "what's next today / tomorrow". Handles plain events, all-day events and the common
+    RRULEs (DAILY / WEEKLY with BYDAY / MONTHLY / YEARLY, INTERVAL, COUNT, UNTIL, EXDATE)."""
+
+    REFRESH_S = 600
+
+    def __init__(self, source: str):
+        self.source = source.strip()
+        self.events = []          # (start, end, title, all_day, rrule, exdates)
+        self.lock = threading.Lock()
+        self.last_error = ""
+        if self.source:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                text = self._read()
+                events = parse_ics(text)
+                with self.lock:
+                    self.events = events
+                if self.last_error:
+                    print(f"{datetime.now():%H:%M:%S} calendar OK ({len(events)} events)", file=sys.stderr)
+                self.last_error = ""
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                if msg != self.last_error:
+                    print(f"{datetime.now():%H:%M:%S} calendar unavailable ({msg})", file=sys.stderr)
+                self.last_error = msg
+            time.sleep(self.REFRESH_S)
+
+    def _read(self) -> str:
+        if self.source.startswith(("http://", "https://", "webcal://")):
+            import urllib.request
+            url = "https://" + self.source[len("webcal://"):] if self.source.startswith("webcal://") else self.source
+            req = urllib.request.Request(url, headers={"User-Agent": f"cyd-usage-server/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read().decode("utf-8", "replace")
+        return Path(self.source).read_text(encoding="utf-8", errors="replace")
+
+    def next_event(self, now: datetime | None = None):
+        with self.lock:
+            events = list(self.events)
+        return next_event(events, now or datetime.now().astimezone())
+
+
+def _ics_lines(text: str) -> list[str]:
+    out = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if raw[:1] in (" ", "\t") and out:
+            out[-1] += raw[1:]          # folded line
+        elif raw:
+            out.append(raw)
+    return out
+
+
+def _ics_unescape(v: str) -> str:
+    return v.replace("\\n", " ").replace("\\N", " ").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+
+def _ics_time(value: str, params: dict):
+    """-> (aware datetime, all_day)"""
+    value = value.strip()
+    local = datetime.now().astimezone().tzinfo
+    if len(value) == 8 or params.get("VALUE") == "DATE":
+        d = datetime.strptime(value[:8], "%Y%m%d")
+        return d.replace(tzinfo=local), True
+    if value.endswith("Z"):
+        from datetime import timezone
+        return datetime.strptime(value[:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc), False
+    dt = datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
+    tz = local
+    if params.get("TZID"):
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(params["TZID"].strip('"'))
+        except Exception:
+            tz = local                  # unknown zone (or no tzdata on Windows): assume this PC's zone
+    return dt.replace(tzinfo=tz), False
+
+
+def parse_ics(text: str) -> list:
+    events, cur = [], None
+    for line in _ics_lines(text):
+        if line == "BEGIN:VEVENT":
+            cur = {"exdates": []}
+            continue
+        if line == "END:VEVENT":
+            if cur and "start" in cur and cur.get("status") != "CANCELLED":
+                start, all_day = cur["start"]
+                if "end" in cur:
+                    end = cur["end"][0]
+                elif "duration" in cur:
+                    end = start + cur["duration"]
+                else:
+                    end = start + (timedelta(days=1) if all_day else timedelta(0))
+                events.append((start, end, cur.get("title", "(no title)"), all_day, cur.get("rrule"), cur["exdates"]))
+            cur = None
+            continue
+        if cur is None or ":" not in line:
+            continue
+        head, value = line.split(":", 1)
+        name, *ps = head.split(";")
+        params = dict(x.split("=", 1) for x in ps if "=" in x)
+        name = name.upper()
+        try:
+            if name == "SUMMARY":
+                cur["title"] = _ics_unescape(value).strip()
+            elif name == "DTSTART":
+                cur["start"] = _ics_time(value, params)
+            elif name == "DTEND":
+                cur["end"] = _ics_time(value, params)
+            elif name == "DURATION":
+                m = re.fullmatch(r"P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", value.strip())
+                if m:
+                    w, d, h, mi, se = (int(x or 0) for x in m.groups())
+                    cur["duration"] = timedelta(weeks=w, days=d, hours=h, minutes=mi, seconds=se)
+            elif name == "RRULE":
+                cur["rrule"] = dict(x.split("=", 1) for x in value.split(";") if "=" in x)
+            elif name == "EXDATE":
+                cur["exdates"] += [_ics_time(v, params)[0] for v in value.split(",")]
+            elif name == "STATUS":
+                cur["status"] = value.strip().upper()
+        except ValueError:
+            continue
+    return events
+
+
+_WEEKDAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def _add_months(dt: datetime, months: int):
+    y, m = divmod(dt.month - 1 + months, 12)
+    try:
+        return dt.replace(year=dt.year + y, month=m + 1)
+    except ValueError:
+        return None                     # e.g. 31st in a short month: RFC 5545 skips it
+
+
+def occurrences(start: datetime, rrule: dict | None, until: datetime, limit: int = 3000):
+    """Start times of a (possibly repeating) event, from DTSTART up to `until`."""
+    if not rrule:
+        if start <= until:
+            yield start
+        return
+    freq = rrule.get("FREQ", "").upper()
+    interval = max(1, int(rrule.get("INTERVAL", "1") or 1))
+    count = int(rrule["COUNT"]) if rrule.get("COUNT", "").isdigit() else None
+    end = None
+    if rrule.get("UNTIL"):
+        try:
+            end = _ics_time(rrule["UNTIL"], {})[0]
+        except ValueError:
+            end = None
+    byday = [d[-2:] for d in rrule.get("BYDAY", "").split(",") if d]
+    if freq == "MONTHLY" and any(len(d) > 2 for d in rrule.get("BYDAY", "").split(",") if d):
+        return                          # "2nd Monday" style rules are not supported
+    n = 0
+    step = 0
+    while step < limit:
+        if freq == "DAILY":
+            cands = [start + timedelta(days=step * interval)]
+        elif freq == "WEEKLY":
+            week0 = start - timedelta(days=start.weekday())
+            week = week0 + timedelta(weeks=step * interval)
+            days = byday or [_WEEKDAYS[start.weekday()]]
+            cands = sorted(week + timedelta(days=_WEEKDAYS.index(d)) for d in days if d in _WEEKDAYS)
+            cands = [c for c in cands if c >= start]
+        elif freq == "MONTHLY":
+            cands = [c for c in [_add_months(start, step * interval)] if c]
+        elif freq == "YEARLY":
+            cands = [c for c in [_add_months(start, 12 * step * interval)] if c]
+        else:
+            if start <= until:
+                yield start
+            return
+        for c in cands:
+            if (end and c > end) or c > until:
+                return
+            n += 1
+            if count is not None and n > count:
+                return
+            yield c
+        step += 1
+
+
+def next_event(events: list, now: datetime):
+    """{"when": NOW|NEXT|TODAY|TOMORROW, "start": "HH:MM" or "", "title": ...} or None."""
+    today = now.date()
+    horizon = datetime.combine(today + timedelta(days=2), datetime.min.time()).replace(tzinfo=now.tzinfo)
+    found = []                          # (priority, start, title, all_day)
+    for start, end, title, all_day, rrule, exdates in events:
+        length = end - start
+        ex = {e.astimezone(now.tzinfo).replace(second=0, microsecond=0) for e in exdates}
+        for occ in occurrences(start, rrule, horizon):
+            occ_local = occ.astimezone(now.tzinfo)
+            if occ_local.replace(second=0, microsecond=0) in ex:
+                continue
+            occ_end = occ_local + length
+            if all_day:
+                if occ_local.date() == today:
+                    found.append((2, occ_local, title, True))
+                elif occ_local.date() == today + timedelta(days=1):
+                    found.append((4, occ_local, title, True))
+            elif occ_local <= now < occ_end:
+                found.append((0, occ_local, title, False))
+            elif occ_local > now and occ_local.date() == today:
+                found.append((1, occ_local, title, False))
+            elif occ_local > now and occ_local.date() == today + timedelta(days=1):
+                found.append((3, occ_local, title, False))
+    if not found:
+        return None
+    prio, start, title, all_day = min(found, key=lambda f: (f[0], f[1]))
+    when = ["NOW", "NEXT", "TODAY", "TOMORROW", "TOMORROW"][prio]
+    return {"when": when, "start": "" if all_day else start.strftime("%H:%M"),
+            "title": thai_marks(unicodedata.normalize("NFC", title))[:70]}
+
+
+# ---- Claude Code permission prompts answered on the CYD -----------------------
+
+class PermissionBroker:
+    """pc_server/permission.py (a PermissionRequest hook) asks here while you're away from the PC.
+    The request shows on the CYD; Allow / Deny comes back through /v1/permission. Nothing is decided
+    without the CYD: no answer, an expired wait or you coming back to the PC -> the hook returns no
+    decision and Claude Code shows its normal prompt."""
+
+    AWAY_S = 60             # route to the CYD only after this much keyboard/mouse idle time
+    CYD_FRESH_S = 150       # ... and only if a CYD polled recently
+
+    def __init__(self, notify):
+        self.notify = notify
+        self.cond = threading.Condition()
+        self.pending = {}   # id -> dict(tool, project, detail, deadline, decision)
+        self.next_id = 1
+
+    def open(self, tool: str, project: str, detail: str, timeout_s: int, cyd_age_s: float):
+        if user_idle_seconds() < self.AWAY_S:
+            return None, "at the PC"
+        if cyd_age_s > self.CYD_FRESH_S:
+            return None, "no CYD online"
+        with self.cond:
+            pid = self.next_id
+            self.next_id += 1
+            self.pending[pid] = {"tool": tool[:23], "project": project[:40], "detail": detail[:160],
+                                 "deadline": time.monotonic() + timeout_s, "decision": None}
+        print(f"{datetime.now():%H:%M:%S} permission #{pid} {tool} -> CYD", file=sys.stderr)
+        self.notify()
+        return pid, ""
+
+    def wait(self, pid: int, timeout_s: float):
+        """Block until the CYD answers, the request expires or you are back at the PC."""
+        end = time.monotonic() + min(timeout_s, 300)
+        try:
+            with self.cond:
+                while True:
+                    req = self.pending.get(pid)
+                    if not req:
+                        return None
+                    if req["decision"]:
+                        return req["decision"]
+                    left = min(end, req["deadline"]) - time.monotonic()
+                    if left <= 0:
+                        return None
+                    if user_idle_seconds() < 3:     # back at the keyboard: answer on the PC instead
+                        return None
+                    self.cond.wait(min(left, 1.0))
+        finally:
+            with self.cond:
+                self.pending.pop(pid, None)
+            self.notify()                           # CYD hides the card
+
+    def answer(self, pid: int, decision: str) -> bool:
+        if decision not in ("allow", "deny"):
+            return False
+        with self.cond:
+            req = self.pending.get(pid)
+            if not req or req["decision"]:
+                return False
+            req["decision"] = decision
+            self.cond.notify_all()
+        print(f"{datetime.now():%H:%M:%S} permission #{pid} {decision} on the CYD", file=sys.stderr)
+        return True
+
+    def current(self):
+        """Oldest unanswered request for the CYD card."""
+        with self.cond:
+            now = time.monotonic()
+            live = [(pid, r) for pid, r in self.pending.items() if not r["decision"] and r["deadline"] > now]
+        if not live:
+            return None
+        pid, r = min(live)
+        return {"id": pid, "tool": r["tool"], "project": r["project"], "detail": r["detail"],
+                "expires_in": max(1, int(r["deadline"] - time.monotonic()))}
+
+
 # ---- PC stats (only measured while the CYD shows its PC page) ----------------
 
 class ThermalZone:
@@ -923,6 +1247,50 @@ class StatsServer(ThreadingHTTPServer):
         self.media = MediaSessions()
         self.event = None          # last Claude Code hook event
         self.event_id = 0
+        self.cyd_ip = ""           # last CYD that polled -> UDP "CLAUDE_DIRTY" goes straight to it
+        self.cyd_seen = 0.0
+        self.media_wanted = 0.0    # last time the CYD showed its Music page
+        self._last_notify = 0.0
+        self.permissions = PermissionBroker(self.notify_cyd)
+        self.calendar = Calendar(args.ics)
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def notify_cyd(self):
+        """Push: tell the CYD something changed so it fetches now instead of at its next poll."""
+        ip = self.cyd_ip
+        if not ip or self.args.no_beacon:
+            return
+        self._last_notify = time.monotonic()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(b"CLAUDE_DIRTY", (ip, BEACON_PORT))
+        except OSError:
+            pass
+
+    def _watch(self):
+        """Watches what the CYD shows and pushes changes: the track / play state while the Music page is
+        open (checked every second), and exact usage % whenever Anthropic's numbers move."""
+        last_media, last_usage = None, None
+        while True:
+            time.sleep(1)
+            try:
+                if time.monotonic() - self.media_wanted < 30:
+                    m = self.media.get() or {}
+                    key = (m.get("title"), m.get("artist"), m.get("playing"), m.get("art_id"), m.get("error"))
+                    if last_media is not None and key != last_media:
+                        self.notify_cyd()
+                    last_media = key
+                else:
+                    last_media = None
+                snap = self.exact.current() if self.exact else None
+                usage = (round(snap["session_pct"]), round(snap["week_pct"])) if snap else None
+                if usage and last_usage and usage != last_usage:
+                    with self._cache_lock:
+                        self._cache = (0.0, None)
+                    self.notify_cyd()
+                last_usage = usage or last_usage
+            except Exception as exc:  # never let the watcher die
+                sys.stderr.write(f"watch error: {exc!r}\n")
 
     def push_event(self, kind: str, project: str, message: str, duration_s: int = -1):
         self.event_id += 1
@@ -987,13 +1355,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.token and not self._authorized():
             return self._send(401, {"error": "unauthorized"})
         try:
-            data = dict(self.server.stats())
-            data["event"] = self.server.event_payload()
+            srv = self.server
+            srv.cyd_ip, srv.cyd_seen = self.client_address[0], time.monotonic()
+            data = dict(srv.stats())
+            data["event"] = srv.event_payload()
+            data["permission"] = srv.permissions.current()
+            data["calendar"] = srv.calendar.next_event()
+            data["pc_locked"] = workstation_locked()
             screens = parse_qs(url.query).get("screens", [""])[0].split(",")
-            if "pc" in screens:  # PC sensors are only read while the CYD shows that page
-                data["pc"] = self.server.pc.get()
-            if "media" in screens:  # same for the now-playing page
-                data["media"] = self.server.media.get()
+            if "pc" in screens:
+                data["pc"] = srv.pc.get()
+            if "media" in screens:  # the media session is only read while the CYD shows that page
+                srv.media_wanted = time.monotonic()
+                data["media"] = srv.media.get()
             return self._send(200, data)
         except Exception as exc:  # keep serving even if a log line is odd
             sys.stderr.write(f"stats error: {exc!r}\n")
@@ -1002,8 +1376,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         # /v1/event: Claude Code hooks (pc_server/notify.py) report "stop" / "notification"
         # /v1/media: CYD music buttons -> {"action": "toggle" | "next" | "prev"}
+        # /v1/permission/request, /v1/permission/wait: pc_server/permission.py (localhost only)
+        # /v1/permission: CYD answers -> {"id": n, "decision": "allow" | "deny"}
         path = urlparse(self.path).path
-        if path not in ("/v1/event", "/v1/media"):
+        if path not in ("/v1/event", "/v1/media", "/v1/permission", "/v1/permission/request", "/v1/permission/wait"):
             return self._send(404, {"error": "not found"})
         if self.server.token and not self._authorized():
             return self._send(401, {"error": "unauthorized"})
@@ -1014,6 +1390,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad json"})
         if path == "/v1/media":
             return self._send(200, {"ok": self.server.media.control(str(body.get("action") or ""))})
+        perms = self.server.permissions
+        if path == "/v1/permission":
+            try:
+                ok = perms.answer(int(body.get("id", 0)), str(body.get("decision") or ""))
+            except (TypeError, ValueError):
+                ok = False
+            return self._send(200, {"ok": ok})
+        if path.startswith("/v1/permission/"):
+            if self.client_address[0] not in ("127.0.0.1", "::1"):  # only the hook on this PC may ask
+                return self._send(403, {"error": "local only"})
+            if path.endswith("/request"):
+                age = time.monotonic() - self.server.cyd_seen if self.server.cyd_seen else 1e9
+                pid, why = perms.open(str(body.get("tool") or "?"), str(body.get("project") or ""),
+                                      str(body.get("detail") or ""), int(body.get("timeout_s") or 90), age)
+                return self._send(200, {"id": pid, "reason": why})
+            try:
+                decision = perms.wait(int(body.get("id", 0)), float(body.get("timeout_s") or 90))
+            except (TypeError, ValueError):
+                decision = None
+            return self._send(200, {"decision": decision})
         kind = body.get("type") if body.get("type") in ("stop", "notification") else "stop"
         try:
             duration = int(body.get("duration_s", -1))
@@ -1033,6 +1429,23 @@ def token_from_secrets(path: Path) -> str:
     except OSError:
         return ""
     return m.group(1) if m else ""
+
+
+def token_from_file(path: Path, create: bool) -> str:
+    """token.txt next to the server; with create, make a random one on first start."""
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    if not create:
+        return ""
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(12)
+    path.write_text(token + "\n", encoding="utf-8")
+    print(f"created {path} - enter this token on the CYD's Wi-Fi setup page: {token}", file=sys.stderr)
+    return token
 
 
 def lan_ips() -> list[str]:
@@ -1102,6 +1515,8 @@ def main():
     ap.add_argument("--exact-interval", type=int, default=120, help="seconds between Anthropic usage fetches")
     ap.add_argument("--credentials", type=Path, default=Path.home() / ".claude" / ".credentials.json",
                     help="Claude Code CLI login file (created by: claude auth login)")
+    ap.add_argument("--ics", default=os.environ.get("CYD_ICS", ""),
+                    help="calendar .ics URL or file for the CYD clock (default: first line of calendar.txt)")
     args = ap.parse_args()
 
     if args.log:
@@ -1116,15 +1531,20 @@ def main():
         calibrate(store, args, *args.calibrate)
         return
     if args.print:
+        args.ics = ""
         if exact:
             exact.busy = True
             exact._fetch()  # synchronous so the snapshot shows exact numbers when available
         print(json.dumps(compute_stats(store, args, exact), indent=2))
         return
 
-    token = "" if args.no_auth else (args.token or token_from_secrets(args.secrets))
-    if not token and not args.no_auth:
-        sys.exit(f"No token: pass --token, set CLAUDE_USAGE_TOKEN, or put CLAUDE_TOKEN in {args.secrets}")
+    if not args.ics:
+        try:
+            args.ics = (here / "calendar.txt").read_text(encoding="utf-8").strip().splitlines()[0]
+        except (OSError, IndexError):
+            args.ics = ""
+    token = "" if args.no_auth else (args.token or token_from_secrets(args.secrets)
+                                     or token_from_file(here / "token.txt", create=True))
     if not args.claude_dir.is_dir():
         print(f"warning: {args.claude_dir} not found - stats will be empty", file=sys.stderr)
 

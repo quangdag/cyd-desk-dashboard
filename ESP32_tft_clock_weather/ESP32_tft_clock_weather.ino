@@ -11,12 +11,16 @@
 //   ESP32_tft_clock_weather.ino  cau hinh, bien dung chung, dieu huong, watchdog, setup/loop (file nay)
 //   net.ino                      WiFi, Open-Meteo, PC server, anh bia album (task mang, core 0)
 //   ui_build.ino                 tao giao dien + xu ly cham
+//   setup_portal.ino             trang Wi-Fi setup (WiFi "CYD-Setup" + trang web 192.168.4.1)
 //   ui_update.ino                cap nhat giao dien, thong bao, canh bao, Pomodoro
 //   cyd_types.h                  kieu du lieu dung chung
-// Den nen luon sang toi da. Mau dao xu ly o User_Setup.h (TFT_INVERSION_ON). WiFi / server trong secrets.h
+// Den nen sang toi da (Settings > SCREEN = WITH PC: tat khi PC khoa / ngu). Mau dao o User_Setup.h.
+// WiFi / token / vi tri nhap qua trang Wi-Fi setup (luu NVS); secrets.h (tuy chon) chi la gia tri mac dinh.
 // Ban sao lv_conf.h va User_Setup.h can dung nam o thu muc config/ cua du an.
 // ============================
 
+#include <WebServer.h>     // trang Wi-Fi setup (phai dung truoc TFT_eSPI / lvgl)
+#include <DNSServer.h>
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
@@ -27,7 +31,11 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <time.h>
-#include "secrets.h"
+#if __has_include("secrets.h")
+#include "secrets.h"            // tuy chon: WiFi / token nap san (khong dua len GitHub)
+#else
+#include "secrets.example.h"    // ban build chung (web flasher): nhap moi thu qua trang Wi-Fi setup
+#endif
 #include "weather_images.h"
 #include "lunar.h"
 #include "cyd_types.h"
@@ -36,6 +44,8 @@
 // =========================
 // CONFIG
 // =========================
+#define FW_VERSION "2.0.0"
+
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
 // Bo dem ve 1/4 man hinh (truoc la 1/10): it lan day SPI hon -> doi tab va chu chay muot hon
@@ -58,9 +68,11 @@
 #define AQI_UPDATE_INTERVAL    1800000UL
 #define NET_RETRY_INTERVAL       60000UL   // loi thi thu lai sau 60s (khong spam moi vong loop)
 #define AQI_QUICK_RETRY          10000UL   // AQI hay bi het gio lan dau -> thu lai nhanh 1 lan
-#define CLAUDE_POLL_ACTIVE        5000UL   // dang xem tab Claude / Account
-#define PC_POLL_ACTIVE            3000UL   // dang xem tab System
-#define MEDIA_POLL_ACTIVE         2000UL   // dang xem tab Music
+// PC server bao thay doi qua UDP ("CLAUDE_DIRTY") -> CYD lay ngay; poll chi la luoi an toan
+#define CLAUDE_POLL_ACTIVE       15000UL   // dang xem tab Claude / Account
+#define PC_POLL_ACTIVE            3000UL   // dang xem tab System (cam bien khong co "thay doi" de bao)
+#define MEDIA_POLL_ACTIVE        10000UL   // dang xem tab Music (vi tri bai tu noi suy moi giay)
+#define PERM_POLL_ACTIVE          2000UL   // dang hien the xin quyen: biet ngay khi da tra loi tren PC
 #define CLAUDE_POLL_IDLE         60000UL
 #define CLAUDE_BACKOFF_START      2000UL
 #define CLAUDE_BACKOFF_MAX       60000UL
@@ -80,6 +92,9 @@
 #define HEAP_CRITICAL_BYTES      12000     // khoi bo nho lon nhat < 12 KB -> khoi dong lai ngay
 #define HEAP_LOW_BYTES           30000     // < 30 KB -> khoi dong lai luc 4:00 sang
 
+#define SCREEN_OFF_AFTER_MS     120000UL   // SCREEN = WITH PC: mat PC 2 phut -> tat den nen
+#define SCREEN_WAKE_MS           30000UL   // cham khi den tat -> sang 30s
+
 #define NOTIFY_AWAY_IDLE_S          60     // che do AWAY: ban roi chuot/phim >= 1 phut
 #define NOTIFY_AWAY_TASK_S         120     // ... hoac luot Claude chay >= 2 phut
 #define RAIN_ALERT_PCT              70     // canh bao mua khi kha nang mua gio toi >= 70%
@@ -87,11 +102,11 @@
 #define POMO_STEP_MIN 5                    // nut - / + doi 5 phut moi lan
 
 const char* NTP_SERVER = "pool.ntp.org";
-const char* TIMEZONE = "ICT-7";
 
-// === Toa do Ngu Hanh Son, Da Nang ===
-const char* LATITUDE = "16.0044";
-const char* LONGITUDE = "108.2632";
+// Mac dinh khi chua nhap o trang Wi-Fi setup: Ngu Hanh Son, Da Nang, gio Viet Nam
+#define DEFAULT_TZ  "ICT-7"
+#define DEFAULT_LAT "16.0044"
+#define DEFAULT_LON "108.2632"
 
 #define TEMP_CELSIUS 1
 #if TEMP_CELSIUS
@@ -121,7 +136,8 @@ static const char* const WEEKDAY_EN[] = {"Sunday", "Monday", "Tuesday", "Wednesd
 
 // Ten tab (tren Home va thong bao)
 static const char* const SCREEN_NAMES[SCREEN_COUNT] = {
-  "HOME", "CLOCK", "WEATHER", "FORECAST", "CLAUDE CODE", "ACCOUNT", "MUSIC", "SYSTEM", "POMODORO", "SETTINGS"
+  "HOME", "CLOCK", "WEATHER", "FORECAST", "CLAUDE CODE", "ACCOUNT", "MUSIC", "SYSTEM", "POMODORO", "SETTINGS",
+  "DEVICE", "WI-FI SETUP"
 };
 #define DEFAULT_SLIDES ((1 << SCR_CLOCK) | (1 << SCR_WEATHER) | (1 << SCR_FORECAST) | (1 << SCR_CLAUDE))
 
@@ -135,6 +151,11 @@ static ClaudeData shared_claude;
 static volatile bool weather_dirty = false, aqi_dirty = false, claude_dirty = false;
 static volatile bool claude_poll_now = false;
 static volatile int media_action = 0;   // 1 = play/pause, 2 = next, 3 = prev (UI dat, task mang gui)
+static volatile int perm_answer_id = 0;  // tra loi the xin quyen (task mang gui): id ...
+static volatile int perm_answer = 0;     // ... va 1 = allow / 2 = deny
+static NetConfig netcfg;                 // doc 1 lan luc khoi dong (sau do chi doc)
+static DevStats dev;
+static volatile bool portal_active = false;   // dang o che do Wi-Fi setup
 static volatile ScreenState current_screen = SCR_HOME;
 static volatile uint32_t net_heartbeat = 0;  // task mang cap nhat moi vong -> loop phat hien treo
 
@@ -160,6 +181,8 @@ static uint16_t slides_mask = DEFAULT_SLIDES;
 static unsigned long last_screen_switch = 0;
 static unsigned long last_display_update = 0;
 
+static lv_display_t* main_disp;
+static bool ui_pc_locked = false;
 static WeatherData ui_weather;          // ban sao cho UI
 static AqiData ui_aqi;
 static MediaData ui_media;
@@ -190,7 +213,21 @@ static lv_obj_t *pc_val[4], *pc_bar[4];
 // Pomodoro
 static lv_obj_t *po_phase, *po_time, *po_bar, *po_count, *po_btn_label, *po_len;
 // Settings: [hang][lua chon]
-static lv_obj_t* set_btn[4][4];
+static lv_obj_t* set_btn[5][4];
+// Device
+static lv_obj_t *dv_val[8], *dv_uptime;
+// Wi-Fi setup
+static lv_obj_t* su_status;
+// Clock: su kien lich
+static lv_obj_t* lb_clock_event;
+// The xin quyen
+static lv_obj_t *perm_card, *perm_count, *perm_where, *perm_detail;
+static int perm_shown_id = 0;
+static unsigned long perm_deadline = 0;
+// Den nen
+static bool backlight_on = true;
+static unsigned long wake_until = 0, pc_seen_ms = 0;
+static bool swallow_touch = false;
 // Toast
 static lv_obj_t *toast, *toast_title, *toast_sub;
 static unsigned long toast_hide_at = 0;
@@ -213,7 +250,8 @@ void log_print(lv_log_level_t level, const char* buf) {
 
 static uint32_t lv_tick_millis() { return millis(); }
 
-static bool claude_enabled() { return CLAUDE_ENABLED && CLAUDE_HOST[0] != '\0'; }
+// Trang can PC: bat khi da co token (IP PC co the tu tim qua UDP beacon)
+static bool claude_enabled() { return CLAUDE_ENABLED && netcfg.token[0] != '\0'; }
 
 // Lay gio khong chan (getLocalTime mac dinh cho toi 5s neu chua dong bo NTP)
 static bool get_time_now(struct tm* t) { return getLocalTime(t, 0); }
@@ -256,11 +294,27 @@ static void beep_tick() {
 // =========================
 // SETTINGS (NVS)
 // =========================
+// Cau hinh mang: NVS (trang Wi-Fi setup) > secrets.h > mac dinh
+static void load_netcfg() {
+  Preferences np;
+  np.begin("net", true);
+  strlcpy(netcfg.ssid, np.getString("ssid", WIFI_SSID).c_str(), sizeof(netcfg.ssid));
+  strlcpy(netcfg.pass, np.getString("pass", WIFI_PASSWORD).c_str(), sizeof(netcfg.pass));
+  strlcpy(netcfg.token, np.getString("token", CLAUDE_TOKEN).c_str(), sizeof(netcfg.token));
+  strlcpy(netcfg.host, np.getString("host", CLAUDE_HOST).c_str(), sizeof(netcfg.host));
+  netcfg.port = np.getUShort("port", CLAUDE_PORT);
+  strlcpy(netcfg.lat, np.getString("lat", DEFAULT_LAT).c_str(), sizeof(netcfg.lat));
+  strlcpy(netcfg.lon, np.getString("lon", DEFAULT_LON).c_str(), sizeof(netcfg.lon));
+  strlcpy(netcfg.tz, np.getString("tz", DEFAULT_TZ).c_str(), sizeof(netcfg.tz));
+  np.end();
+}
+
 static void load_settings() {
   settings.beep = prefs.getBool("beep", true);
   settings.notify = prefs.getUChar("notify", NOTIFY_AWAY);
   settings.slide_s = prefs.getUChar("slide", 20);
   settings.alerts = prefs.getBool("alerts", true);
+  settings.screen = prefs.getUChar("scrmode", SCREEN_ALWAYS);
   slides_mask = prefs.getUShort("slides", DEFAULT_SLIDES);
   pomo_min[0] = prefs.getUChar("pf", 25);
   pomo_min[1] = prefs.getUChar("pb", 5);
@@ -273,6 +327,7 @@ static void save_settings() {
   prefs.putUChar("notify", settings.notify);
   prefs.putUChar("slide", settings.slide_s);
   prefs.putBool("alerts", settings.alerts);
+  prefs.putUChar("scrmode", settings.screen);
 }
 
 // =========================
@@ -280,7 +335,7 @@ static void save_settings() {
 // =========================
 static bool screen_enabled(ScreenState s) {
   if ((s == SCR_CLAUDE || s == SCR_ACCOUNT || s == SCR_PC || s == SCR_MUSIC) && !claude_enabled()) return false;
-  return s != SCR_HOME && s != SCR_SETTINGS;
+  return s != SCR_HOME && s != SCR_SETTINGS && s != SCR_DEVICE && s != SCR_SETUP;
 }
 
 static bool in_slideshow(ScreenState s) { return screen_enabled(s) && (slides_mask & (1 << s)); }
@@ -299,10 +354,12 @@ static void save_nav() {
 }
 
 static void show_screen(ScreenState s) {
+  if (s == SCR_DEVICE && !screens[s]) create_device_screen();   // tao khi mo lan dau (tiet kiem RAM)
   current_screen = s;
   lv_screen_load(screens[s]);   // doi trang tuc thi (khong hieu ung -> khong giat)
   last_screen_switch = millis();
   if (s == SCR_CLAUDE || s == SCR_ACCOUNT || s == SCR_PC || s == SCR_MUSIC) claude_poll_now = true;
+  if (s == SCR_DEVICE) update_device_display();
 }
 
 static void go_home() {
@@ -314,7 +371,7 @@ static void go_home() {
 static void open_tab(ScreenState s) {
   nav_mode = MODE_FIXED;
   show_screen(s);
-  if (s != SCR_SETTINGS) save_nav();
+  if (screen_enabled(s)) save_nav();   // Settings / Device / Wi-Fi setup khong nho qua lan khoi dong
 }
 
 static void start_slideshow() {
@@ -357,6 +414,109 @@ static void guard_tick() {
 }
 
 // =========================
+// DEN NEN: SCREEN = WITH PC -> tat khi PC khoa man hinh, ngu hoac tat (mat ket noi 2 phut)
+// =========================
+static void set_backlight(bool on) {
+  if (on == backlight_on) return;
+  backlight_on = on;
+  digitalWrite(TFT_BL_PIN, on ? HIGH : LOW);
+}
+
+static void wake_screen(unsigned long ms) {
+  wake_until = millis() + ms;
+  set_backlight(true);
+}
+
+static void backlight_tick(bool pc_locked) {
+  unsigned long now = millis();
+  bool pc_here = pc_seen_ms && now - pc_seen_ms < SCREEN_OFF_AFTER_MS && !pc_locked;
+  bool want = settings.screen == SCREEN_ALWAYS || portal_active || !claude_enabled() || pc_here ||
+              (long)(wake_until - now) > 0;
+  set_backlight(want);
+}
+
+// =========================
+// DO HIEU NANG VE: thoi gian ve 1 khung (RENDER_START -> RENDER_READY)
+// =========================
+static void render_event_cb(lv_event_t* e) {
+  static uint32_t t0 = 0, sum = 0, n = 0, mx = 0, window_start = 0;
+  uint32_t now = micros();
+  if (lv_event_get_code(e) == LV_EVENT_RENDER_START) { t0 = now; return; }
+  uint32_t us = now - t0;
+  sum += us; n++; mx = max(mx, us);
+  dev.frames++;
+  if (millis() - window_start >= 5000) {  // trung binh / lon nhat trong 5s gan nhat
+    dev.frame_us_avg = n ? sum / n : 0;
+    dev.frame_us_max = mx;
+    sum = n = mx = 0;
+    window_start = millis();
+  }
+}
+
+// =========================
+// LENH QUA CONG USB (115200): chup man hinh cho README, doi tab, so lieu
+//   SHOT   -> "SHOT 320 240 921600", doi toc do 921600, gui 320x240 RGB565 tung dong, roi ve 115200
+//   TAB n  -> mo trang n (ScreenState), tra "OK"
+//   STATS  -> 1 dong JSON so lieu suc khoe
+//   SETUP  -> khoi dong lai vao trang Wi-Fi setup     RESTART -> khoi dong lai
+// tools/cyd_capture.py dung cac lenh nay
+// =========================
+static void capture_screen(lv_display_t* disp) {
+  TFT_eSPI* tft = *(TFT_eSPI**)lv_display_get_driver_data(disp);  // lv_tft_espi_t { TFT_eSPI* tft; }
+  static uint16_t line[SCREEN_HEIGHT];
+  Serial.printf("SHOT %d %d 921600\n", SCREEN_HEIGHT, SCREEN_WIDTH);
+  Serial.flush();
+  delay(50);
+  Serial.updateBaudRate(921600);
+  delay(300);
+  for (int y = 0; y < SCREEN_WIDTH; y++) {
+    tft->readRect(0, y, SCREEN_HEIGHT, 1, line);
+    Serial.write((const uint8_t*)line, sizeof(line));
+    if (y % 16 == 0) feedLoopWDT();
+  }
+  Serial.flush();
+  delay(100);
+  Serial.updateBaudRate(115200);
+}
+
+static void serial_tick(lv_display_t* disp) {
+  static char cmd[24];
+  static int len = 0;
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch != '\n' && ch != '\r') {
+      if (len < (int)sizeof(cmd) - 1) cmd[len++] = ch;
+      continue;
+    }
+    if (!len) continue;
+    cmd[len] = '\0';
+    len = 0;
+    int n;
+    if (strcmp(cmd, "SHOT") == 0) {
+      lv_refr_now(disp);   // ve xong moi thu dang cho truoc khi doc lai man hinh
+      capture_screen(disp);
+    } else if (sscanf(cmd, "TAB %d", &n) == 1 && n >= 0 && n < SCREEN_COUNT) {
+      if (n == SCR_HOME) go_home();
+      else open_tab((ScreenState)n);
+      lv_refr_now(disp);
+      Serial.println("OK");
+    } else if (strcmp(cmd, "SETUP") == 0) {
+      request_portal_and_restart();
+    } else if (strcmp(cmd, "RESTART") == 0) {
+      ESP.restart();
+    } else if (strcmp(cmd, "STATS") == 0) {
+      Serial.printf("{\"fw\":\"%s\",\"uptime_s\":%lu,\"heap\":%u,\"heap_min\":%u,\"largest\":%u,\"rssi\":%d,"
+                    "\"wifi_drops\":%u,\"frame_ms_avg\":%.1f,\"frame_ms_max\":%.1f,\"server_ms\":%u,"
+                    "\"server_fail\":%u,\"weather_ms\":%u,\"weather_fail\":%u}\n",
+                    FW_VERSION, millis() / 1000, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+                    (unsigned)ESP.getMaxAllocHeap(), WiFi.RSSI(), (unsigned)dev.wifi_drops,
+                    dev.frame_us_avg / 1000.0, dev.frame_us_max / 1000.0, (unsigned)dev.server_ms,
+                    (unsigned)dev.server_fail, (unsigned)dev.weather_ms, (unsigned)dev.weather_fail);
+    }
+  }
+}
+
+// =========================
 // SETUP / LOOP
 // =========================
 void setup() {
@@ -365,6 +525,7 @@ void setup() {
   data_mutex = xSemaphoreCreateMutex();
   prefs.begin("cyd", false);
   load_settings();
+  load_netcfg();
 
   // === DEN NEN: luon sang toi da (chan BL keo HIGH co dinh, khong PWM / khong tu giam) ===
   pinMode(TFT_BL_PIN, OUTPUT);
@@ -397,6 +558,9 @@ void setup() {
   lv_log_register_print_cb(log_print);
   lv_display_t* disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90);   // lat lai man (doi 270 -> 90)
+  lv_display_add_event_cb(disp, render_event_cb, LV_EVENT_RENDER_START, NULL);
+  lv_display_add_event_cb(disp, render_event_cb, LV_EVENT_RENDER_READY, NULL);
+  main_disp = disp;
   digitalWrite(TFT_BL_PIN, HIGH);                          // dam bao van sang toi da sau khi driver khoi tao
 
   lv_indev_t* indev = lv_indev_create();
@@ -404,6 +568,7 @@ void setup() {
   lv_indev_set_read_cb(indev, touch_read_cb);
   lv_indev_set_long_press_time(indev, LONG_PRESS_MS);
 
+  portal_active = !netcfg.ssid[0] || portal_requested();  // chua co WiFi (ban build chung) / bam WI-FI SETUP
   create_all_screens();
   pomo_update_display();
 
@@ -413,6 +578,7 @@ void setup() {
   ScreenState start = (s < SCREEN_COUNT && screen_enabled((ScreenState)s)) ? (ScreenState)s : SCR_CLOCK;
   if (nav_mode == MODE_HOME) start = SCR_HOME;
   if (nav_mode == MODE_SLIDESHOW && !in_slideshow(start)) start = next_slide(start);
+  if (portal_active) start = SCR_SETUP;
   show_screen(start);
   lv_timer_handler();
 
@@ -421,10 +587,14 @@ void setup() {
                 (unsigned)ESP.getMaxAllocHeap());
 
   // === WiFi khong chan: mang chay o task rieng, UI van chay khi mat mang ===
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  xTaskCreatePinnedToCore(network_task, "net", 10240, NULL, 1, NULL, 0);
+  if (portal_active) {
+    xTaskCreatePinnedToCore(portal_task, "portal", 8192, NULL, 1, NULL, 0);
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(netcfg.ssid, netcfg.pass);
+    xTaskCreatePinnedToCore(network_task, "net", 10240, NULL, 1, NULL, 0);
+  }
 
   enableLoopWDT();   // loop() treo > 5s -> chip tu khoi dong lai
   Serial.println("Setup completed!");
@@ -441,11 +611,15 @@ void loop() {
     update_clock_display();
     pomo_update_display();
     if (current_screen == SCR_MUSIC) update_music_progress();
+    if (current_screen == SCR_DEVICE) update_device_display();
+    if (portal_active) update_setup_display();
     last_display_update = now;
   }
   update_weather_display();
   update_claude_display();
   update_album_art();
+  update_permission_card();
+  serial_tick(main_disp);
   pomo_tick();
   beep_tick();
   if (toast_hide_at && now >= toast_hide_at) {
@@ -457,6 +631,7 @@ void loop() {
     flash_hide_at = 0;
   }
   guard_tick();
+  backlight_tick(ui_pc_locked);
 
   lv_timer_handler();
   delay(5);

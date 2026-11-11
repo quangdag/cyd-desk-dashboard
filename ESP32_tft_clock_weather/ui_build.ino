@@ -12,7 +12,16 @@
 #define TOUCH_RAW_BOTTOM 3428
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
   LV_UNUSED(indev);
-  if (touchscreen.tirqTouched() && touchscreen.touched()) {
+  bool touched = touchscreen.tirqTouched() && touchscreen.touched();
+  if (touched && !backlight_on) swallow_touch = true;  // den dang tat: cham chi de bat man, khong bam nham
+  if (swallow_touch) {
+    wake_screen(SCREEN_WAKE_MS);
+    if (!touched) swallow_touch = false;
+    data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
+  if (touched) {
+    wake_screen(SCREEN_WAKE_MS);
     TS_Point p = touchscreen.getPoint();
     // Toa do man ngang (0..319, 0..239)
     int lx = constrain(map(p.y, TOUCH_RAW_LEFT, TOUCH_RAW_RIGHT, 0, SCREEN_HEIGHT - 1), 0, SCREEN_HEIGHT - 1);
@@ -241,7 +250,13 @@ void create_clock_screen() {
   lb_clock_time = make_label(scr, &fr_num_64, C_FG, "--:--:--");
   lv_obj_align(lb_clock_time, LV_ALIGN_CENTER, 0, -14);
   lb_clock_lunar = make_label(scr, &mont_vi_16, C_ACCENT, "");
-  lv_obj_align(lb_clock_lunar, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_align(lb_clock_lunar, LV_ALIGN_CENTER, 0, 38);
+  // Su kien lich sap toi (PC server doc file ICS); trong neu khong co
+  lb_clock_event = make_label(scr, &mont_vi_14, C_FG, "");
+  lv_obj_set_size(lb_clock_event, 292, lv_font_get_line_height(&mont_vi_14));  // 1 dong, dai qua thi "..."
+  lv_obj_set_style_text_align(lb_clock_event, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(lb_clock_event, LV_LABEL_LONG_DOT);
+  lv_obj_align(lb_clock_event, LV_ALIGN_CENTER, 0, 62);
   // duong ke mong ngan cach dong thoi tiet, kieu tap chi
   lv_obj_t* rule = lv_obj_create(scr);
   lv_obj_remove_style_all(rule);
@@ -517,13 +532,15 @@ void create_pomo_screen() {
   make_btn(scr, 192, 176, 88, 46, 12, C_TILE, C_FG, "Reset", &lv_font_montserrat_16, pomo_reset_cb, 0, NULL);
 }
 
-// ---- Settings: 4 hang lua chon, luu NVS ----
-static const char* const SET_ROWS[4] = {"SOUND", "NOTIFY", "SLIDESHOW", "ALERTS"};
-static const char* const SET_OPTS[4][4] = {
+// ---- Settings: 5 hang lua chon (luu NVS) + nut Device info / Wi-Fi setup ----
+#define SET_ROW_COUNT 5
+static const char* const SET_ROWS[SET_ROW_COUNT] = {"SOUND", "NOTIFY", "SLIDESHOW", "ALERTS", "SCREEN"};
+static const char* const SET_OPTS[SET_ROW_COUNT][4] = {
   {"ON", "OFF", nullptr, nullptr},
   {"ALWAYS", "AWAY", nullptr, nullptr},
   {"10S", "20S", "30S", "60S"},
   {"ON", "OFF", nullptr, nullptr},
+  {"ALWAYS", "WITH PC", nullptr, nullptr},
 };
 static const uint8_t SLIDE_CHOICES[4] = {10, 20, 30, 60};
 
@@ -532,12 +549,13 @@ static int settings_selected(int row) {
     case 0: return settings.beep ? 0 : 1;
     case 1: return settings.notify == NOTIFY_ALWAYS ? 0 : 1;
     case 2: for (int i = 0; i < 4; i++) if (SLIDE_CHOICES[i] == settings.slide_s) return i; return 1;
-    default: return settings.alerts ? 0 : 1;
+    case 3: return settings.alerts ? 0 : 1;
+    default: return settings.screen == SCREEN_ALWAYS ? 0 : 1;
   }
 }
 
 static void refresh_settings_buttons() {
-  for (int r = 0; r < 4; r++) {
+  for (int r = 0; r < SET_ROW_COUNT; r++) {
     int sel = settings_selected(r);
     for (int o = 0; o < 4; o++) {
       lv_obj_t* b = set_btn[r][o];
@@ -556,11 +574,22 @@ static void settings_cb(lv_event_t* e) {
     case 0: settings.beep = opt == 0; break;
     case 1: settings.notify = opt == 0 ? NOTIFY_ALWAYS : NOTIFY_AWAY; break;
     case 2: settings.slide_s = SLIDE_CHOICES[opt]; break;
-    default: settings.alerts = opt == 0; break;
+    case 3: settings.alerts = opt == 0; break;
+    default: settings.screen = opt == 0 ? SCREEN_ALWAYS : SCREEN_WITH_PC; wake_screen(SCREEN_WAKE_MS); break;
   }
   save_settings();
   refresh_settings_buttons();
   if (row == 0 && settings.beep) beep(BEEP_DONE);  // nghe thu
+}
+
+static void device_open_cb(lv_event_t* e) {
+  LV_UNUSED(e);
+  open_tab(SCR_DEVICE);
+}
+
+static void wifi_setup_cb(lv_event_t* e) {
+  LV_UNUSED(e);
+  request_portal_and_restart();
 }
 
 void create_settings_screen() {
@@ -568,25 +597,75 @@ void create_settings_screen() {
   title(scr, "SETTINGS");
   lv_obj_t* hint = make_caps(scr, C_MUTED, "TAP EMPTY SPACE = HOME");
   lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -14, 10);
-  for (int r = 0; r < 4; r++) {
-    int y = 34 + r * 44;
+  for (int r = 0; r < SET_ROW_COUNT; r++) {
+    int y = 30 + r * 34;
     lv_obj_t* l = make_caps(scr, C_FG, SET_ROWS[r]);
-    lv_obj_set_pos(l, 14, y + 10);
+    lv_obj_set_pos(l, 14, y + 8);
     int n = SET_OPTS[r][2] ? 4 : 2;
     int w = n == 4 ? 46 : 74, gap = 6;
     int x = 306 - n * w - (n - 1) * gap;
     for (int o = 0; o < n; o++) {
-      set_btn[r][o] = make_btn(scr, x + o * (w + gap), y, w, 32, 8, C_TILE, C_FG, SET_OPTS[r][o],
+      set_btn[r][o] = make_btn(scr, x + o * (w + gap), y, w, 28, 8, C_TILE, C_FG, SET_OPTS[r][o],
                                &lv_font_montserrat_12, settings_cb, r * 8 + o, NULL);
     }
   }
-  lv_obj_t* help = make_label(scr, &lv_font_montserrat_12, C_MUTED,
-                              "AWAY: alert if idle 1 min+ or Claude ran 2 min+\n"
-                              "ALERTS: quota 80% / 95%, new session, rain");
-  lv_obj_set_width(help, 292);
-  lv_label_set_long_mode(help, LV_LABEL_LONG_DOT);
-  lv_obj_set_pos(help, 14, 206);
+  // Hai nut duoi cung: chua du khoang trong 10px voi mep duoi man
+  make_btn(scr, 14, 200, 142, 30, 8, C_TILE, C_FG, "DEVICE INFO", &lv_font_montserrat_12, device_open_cb, 0, NULL);
+  make_btn(scr, 164, 200, 142, 30, 8, C_TILE, C_FG, "WI-FI SETUP", &lv_font_montserrat_12, wifi_setup_cb, 0, NULL);
   refresh_settings_buttons();
+}
+
+// ---- Device: so lieu suc khoe (cap nhat moi giay khi dang mo) ----
+static const char* const DEV_ROWS[8] = {"FRAME TIME", "FREE RAM", "LOWEST RAM", "WI-FI", "IP", "PC SERVER",
+                                        "WEATHER API", "FIRMWARE"};
+void create_device_screen() {
+  lv_obj_t* scr = screens[SCR_DEVICE] = make_screen();
+  title(scr, "DEVICE");
+  dv_uptime = make_caps(scr, C_MUTED, "");
+  lv_obj_align(dv_uptime, LV_ALIGN_TOP_RIGHT, -14, 10);
+  for (int i = 0; i < 8; i++) {
+    int y = 34 + i * 25;
+    lv_obj_t* l = make_caps(scr, C_MUTED, DEV_ROWS[i]);
+    lv_obj_set_pos(l, 14, y + 2);
+    dv_val[i] = make_label(scr, &lv_font_montserrat_14, C_FG, "--");
+    lv_obj_align(dv_val[i], LV_ALIGN_TOP_RIGHT, -14, y);
+  }
+}
+
+// ---- Wi-Fi setup: huong dan noi dien thoai vao CYD ----
+static void setup_cancel_cb(lv_event_t* e) {
+  LV_UNUSED(e);
+  ESP.restart();   // giu cau hinh cu
+}
+
+void create_setup_screen() {
+  lv_obj_t* scr = screens[SCR_SETUP] = lv_obj_create(NULL);  // khong ve Home khi cham: dang cai dat
+  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
+  lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+  title(scr, "WI-FI SETUP");
+  static const char* const steps[3] = {"On your phone, join Wi-Fi", "A setup page opens. If not, go to",
+                                       "Enter your Wi-Fi and the PC token"};
+  static const char* const big[2] = {"CYD-Setup", "192.168.4.1"};
+  int y = 36;
+  for (int i = 0; i < 3; i++) {
+    char num[4];
+    snprintf(num, sizeof(num), "%d", i + 1);
+    lv_obj_t* n = make_caps(scr, C_MUTED, num);
+    lv_obj_set_pos(n, 14, y + 2);
+    lv_obj_t* t = make_label(scr, &lv_font_montserrat_14, C_FG, steps[i]);
+    lv_obj_set_pos(t, 32, y);
+    y += 22;
+    if (i < 2) {
+      lv_obj_t* b = make_label(scr, i == 0 ? &lv_font_montserrat_24 : &fr_num_24, i == 0 ? C_ACCENT : C_FG, big[i]);
+      lv_obj_set_pos(b, 32, y);
+      y += 36;
+    }
+  }
+  su_status = make_caps(scr, C_MUTED, "");
+  lv_obj_set_pos(su_status, 14, 212);
+  if (netcfg.ssid[0]) {  // vao tu Settings: cho phep huy
+    make_btn(scr, 226, 202, 80, 30, 8, C_TILE, C_FG, "CANCEL", &lv_font_montserrat_12, setup_cancel_cb, 0, NULL);
+  }
 }
 
 // ---- Lop tren cung: thong bao ngan + the thong bao ----
@@ -640,6 +719,44 @@ static void show_toast(const char* t, const char* sub, uint32_t color) {
   toast_hide_at = millis() + TOAST_MS;
 }
 
+// ---- The xin quyen Claude Code: Deny / Allow (chi hien khi ban vang mat, xem pc_server/permission.py) ----
+static void perm_btn_cb(lv_event_t* e) {
+  int allow = (int)(intptr_t)lv_event_get_user_data(e);
+  if (!perm_shown_id) return;
+  perm_answer = allow ? 1 : 2;
+  perm_answer_id = perm_shown_id;     // task mang gui len PC
+  flash(allow ? "ALLOWED" : "DENIED");
+  lv_obj_add_flag(perm_card, LV_OBJ_FLAG_HIDDEN);
+  perm_deadline = 0;
+}
+
+void create_permission_card() {
+  perm_card = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(perm_card, 300, 220);
+  lv_obj_center(perm_card);
+  lv_obj_set_style_bg_color(perm_card, lv_color_hex(C_BG), 0);
+  lv_obj_set_style_border_width(perm_card, 3, 0);
+  lv_obj_set_style_border_color(perm_card, lv_color_hex(C_ACCENT), 0);
+  lv_obj_set_style_radius(perm_card, 14, 0);
+  lv_obj_set_style_pad_all(perm_card, 12, 0);
+  lv_obj_remove_flag(perm_card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* t = make_caps(perm_card, C_ACCENT, "CLAUDE ASKS PERMISSION");
+  lv_obj_set_pos(t, 0, 0);
+  perm_count = make_caps(perm_card, C_MUTED, "");
+  lv_obj_align(perm_count, LV_ALIGN_TOP_RIGHT, 0, 0);
+  perm_where = make_label(perm_card, &mont_vi_14, C_MUTED, "");
+  lv_obj_set_width(perm_where, 270);
+  lv_label_set_long_mode(perm_where, LV_LABEL_LONG_DOT);
+  lv_obj_set_pos(perm_where, 0, 22);
+  perm_detail = make_label(perm_card, &mont_vi_16, C_FG, "");
+  lv_obj_set_size(perm_detail, 270, 66);
+  lv_label_set_long_mode(perm_detail, LV_LABEL_LONG_DOT);
+  lv_obj_set_pos(perm_detail, 0, 48);
+  make_btn(perm_card, 0, 144, 128, 44, 12, C_TILE, C_FG, "Deny", &lv_font_montserrat_16, perm_btn_cb, 0, NULL);
+  make_btn(perm_card, 142, 144, 128, 44, 12, C_ACCENT, C_BG, "Allow", &lv_font_montserrat_16, perm_btn_cb, 1, NULL);
+  lv_obj_add_flag(perm_card, LV_OBJ_FLAG_HIDDEN);
+}
+
 void create_all_screens() {
   create_home_screen();
   create_clock_screen();
@@ -651,6 +768,8 @@ void create_all_screens() {
   create_pc_screen();
   create_pomo_screen();
   create_settings_screen();
+  if (portal_active) create_setup_screen();   // Device: tao khi mo lan dau (show_screen)
   create_flash_badge();
   create_toast();
+  create_permission_card();
 }

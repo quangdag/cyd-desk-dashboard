@@ -406,6 +406,89 @@ static void check_quota_alerts(const ClaudeData& c) {
   strlcpy(last_resets, c.resets_at, sizeof(last_resets));
 }
 
+// Clock: "NEXT 14:00 Hop nhom" / "NOW ..." / "TOMORROW 09:00 ..."
+static void update_calendar_line(const CalendarNext& cal) {
+  char buf[96];
+  if (!cal.has) { lv_label_set_text(lb_clock_event, ""); return; }
+  if (cal.start[0]) snprintf(buf, sizeof(buf), "%s  %s  %s", cal.when, cal.start, cal.title);
+  else snprintf(buf, sizeof(buf), "%s  %s", cal.when, cal.title);
+  lv_label_set_text(lb_clock_event, buf);
+}
+
+// The xin quyen: hien khi PC bao co yeu cau moi, an khi da tra loi (o CYD hoac PC) hoac het gio
+static PermissionReq ui_perm;
+static void sync_permission(const PermissionReq& p) {
+  if (p.id && p.id != perm_shown_id && p.id != perm_answer_id) {
+    ui_perm = p;
+    perm_shown_id = p.id;
+    perm_deadline = millis() + max(p.expires_s, 1) * 1000UL;
+    char where[96];
+    snprintf(where, sizeof(where), "%s  |  %s", p.project, p.tool);
+    lv_label_set_text(perm_where, where);
+    lv_label_set_text(perm_detail, p.detail);
+    lv_obj_remove_flag(perm_card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(perm_card);
+    wake_screen(max(p.expires_s, 1) * 1000UL);
+    beep(BEEP_WAIT);
+  } else if (!p.id && perm_shown_id) {  // da tra loi tren PC / ban quay lai may / het gio
+    perm_shown_id = 0;
+    perm_deadline = 0;
+    lv_obj_add_flag(perm_card, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void update_permission_card() {
+  if (!perm_deadline) return;
+  long left = (long)(perm_deadline - millis());
+  if (left <= 0) {
+    perm_deadline = 0;
+    lv_obj_add_flag(perm_card, LV_OBJ_FLAG_HIDDEN);   // PC tu hien hop thoai binh thuong
+    return;
+  }
+  static long last_s = -1;
+  long sec = (left + 999) / 1000;
+  if (sec == last_s) return;
+  last_s = sec;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%lds", sec);
+  lv_label_set_text(perm_count, buf);
+}
+
+// Device: so lieu suc khoe, goi moi giay khi dang mo trang
+static void update_device_display() {
+  char buf[48];
+  unsigned long up = millis() / 1000;
+  snprintf(buf, sizeof(buf), "UP %lud %02luh %02lum", up / 86400, up / 3600 % 24, up / 60 % 60);
+  lv_label_set_text(dv_uptime, buf);
+  snprintf(buf, sizeof(buf), "%.1f ms avg | %.0f max", dev.frame_us_avg / 1000.0, dev.frame_us_max / 1000.0);
+  lv_label_set_text(dv_val[0], buf);
+  snprintf(buf, sizeof(buf), "%u KB | block %u KB", (unsigned)(ESP.getFreeHeap() / 1024),
+           (unsigned)(ESP.getMaxAllocHeap() / 1024));
+  lv_label_set_text(dv_val[1], buf);
+  snprintf(buf, sizeof(buf), "%u KB since boot", (unsigned)(ESP.getMinFreeHeap() / 1024));
+  lv_label_set_text(dv_val[2], buf);
+  if (WiFi.status() == WL_CONNECTED) snprintf(buf, sizeof(buf), "%d dBm | %u drops", WiFi.RSSI(), (unsigned)dev.wifi_drops);
+  else snprintf(buf, sizeof(buf), "offline | %u drops", (unsigned)dev.wifi_drops);
+  lv_label_set_text(dv_val[3], buf);
+  lv_label_set_text(dv_val[4], WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "--");
+  if (!claude_enabled()) snprintf(buf, sizeof(buf), "off (no token)");
+  else snprintf(buf, sizeof(buf), "%u ms | %u errors", (unsigned)dev.server_ms, (unsigned)dev.server_fail);
+  lv_label_set_text(dv_val[5], buf);
+  snprintf(buf, sizeof(buf), "%u ms | %u errors", (unsigned)dev.weather_ms, (unsigned)dev.weather_fail);
+  lv_label_set_text(dv_val[6], buf);
+  snprintf(buf, sizeof(buf), "%s | LVGL %d.%d.%d", FW_VERSION, LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
+  lv_label_set_text(dv_val[7], buf);
+}
+
+// Wi-Fi setup: bao khi dien thoai da noi vao CYD-Setup
+static void update_setup_display() {
+  char buf[48];
+  if (portal_saved) snprintf(buf, sizeof(buf), "SAVED, RESTARTING...");
+  else if (portal_clients) snprintf(buf, sizeof(buf), "PHONE CONNECTED - OPEN THE PAGE");
+  else snprintf(buf, sizeof(buf), "WAITING FOR A PHONE...");
+  lv_label_set_text(su_status, buf);
+}
+
 void update_claude_display() {
   if (!claude_dirty) return;
   static ClaudeData c;  // static: struct lon (~1 KB), tranh tran stack loop
@@ -413,6 +496,12 @@ void update_claude_display() {
   c = shared_claude;
   claude_dirty = false;
   xSemaphoreGive(data_mutex);
+  if (c.valid && !c.stale) pc_seen_ms = millis();   // cho SCREEN = WITH PC
+  ui_pc_locked = c.valid && !c.stale && c.pc_locked;
+  if (!c.stale) {
+    update_calendar_line(c.cal);
+    sync_permission(c.perm);
+  }
 
   char buf[64];
   if (!c.valid) {

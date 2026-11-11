@@ -1,0 +1,56 @@
+name: Release
+
+# Push a tag like v2.0.0 -> build the generic firmware, attach it to a GitHub Release and publish the
+# browser flasher (web/) with that firmware to GitHub Pages.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core and libraries
+        env:
+          ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX"
+          arduino-cli core install esp32:esp32@3.3.7 --additional-urls "$ESP32_INDEX"
+          arduino-cli lib install "lvgl@9.5.0" "TFT_eSPI@2.5.43" "XPT2046_Touchscreen@1.4" "ArduinoJson@7.4.3"
+          cp config/lv_conf.h "$HOME/Arduino/libraries/lv_conf.h"
+          cp config/User_Setup.h "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
+      - name: Compile
+        run: arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --output-dir build ESP32_tft_clock_weather
+      - name: Assemble the flasher site
+        run: |
+          mkdir -p site
+          cp -r web/. site/
+          cp build/ESP32_tft_clock_weather.ino.merged.bin site/cyd-desk-dashboard.bin
+          version="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" site/manifest.json
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: site/cyd-desk-dashboard.bin
+          generate_release_notes: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

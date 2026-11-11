@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core and libraries
+        env:
+          ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX"
+          arduino-cli core install esp32:esp32@3.3.7 --additional-urls "$ESP32_INDEX"
+          arduino-cli lib install "lvgl@9.5.0" "TFT_eSPI@2.5.43" "XPT2046_Touchscreen@1.4" "ArduinoJson@7.4.3"
+      - name: Use this project's lv_conf.h and TFT_eSPI setup
+        run: |
+          LIBS="$HOME/Arduino/libraries"
+          cp config/lv_conf.h "$LIBS/lv_conf.h"
+          cp config/User_Setup.h "$LIBS/TFT_eSPI/User_Setup.h"
+      - name: Compile (generic build, no secrets.h)
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+            --output-dir build ESP32_tft_clock_weather | tee build.log
+          grep -E "Sketch uses|Global variables" build.log >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/ESP32_tft_clock_weather.ino.merged.bin
+
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pillow
+      - name: Unit tests (calendar, permissions, Thai marks, helpers)
+        run: python -m unittest discover -s pc_server/tests -v

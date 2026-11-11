@@ -36,13 +36,16 @@ static bool http_post_json(const String& url, const String& body, const char* be
 
 // Thoi tiet hien tai + 6 gio toi + 3 ngay (mot request Open-Meteo)
 static bool fetch_weather() {
-  String url = String("http://api.open-meteo.com/v1/forecast?latitude=") + LATITUDE + "&longitude=" + LONGITUDE +
+  String url = String("http://api.open-meteo.com/v1/forecast?latitude=") + netcfg.lat + "&longitude=" + netcfg.lon +
                "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,is_day,wind_speed_10m" +
                "&hourly=temperature_2m,precipitation_probability,weather_code,is_day&forecast_hours=8" +
                "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=3" +
                "&temperature_unit=" + TEMP_UNIT_PARAM + "&timezone=auto";
   JsonDocument doc;
-  if (!http_get_json(url, doc, nullptr, HTTP_TIMEOUT_MS)) return false;
+  uint32_t t0 = millis();
+  bool got = http_get_json(url, doc, nullptr, HTTP_TIMEOUT_MS);
+  dev.weather_ms = millis() - t0;
+  if (!got) { dev.weather_fail++; return false; }
   JsonObjectConst cur = doc["current"];
   if (cur.isNull()) return false;
 
@@ -93,8 +96,8 @@ static bool fetch_weather() {
 }
 
 static bool fetch_aqi() {
-  String url = String("http://air-quality-api.open-meteo.com/v1/air-quality?latitude=") + LATITUDE +
-               "&longitude=" + LONGITUDE + "&current=us_aqi,pm2_5&timezone=auto";
+  String url = String("http://air-quality-api.open-meteo.com/v1/air-quality?latitude=") + netcfg.lat +
+               "&longitude=" + netcfg.lon + "&current=us_aqi,pm2_5&timezone=auto";
   JsonDocument doc;
   if (!http_get_json(url, doc, nullptr, AQI_TIMEOUT_MS)) return false;
   JsonObjectConst cur = doc["current"];
@@ -111,16 +114,16 @@ static bool fetch_aqi() {
   return true;
 }
 
-// Dia chi server hien tai: mac dinh tu secrets.h, cap nhat khi nghe thay beacon (chi task mang dung)
-static char claude_host[16];
-static uint16_t claude_port = CLAUDE_PORT;
+// Dia chi server hien tai: tu trang Wi-Fi setup / secrets.h, cap nhat khi nghe thay beacon (chi task mang dung)
+static char claude_host[40];
+static uint16_t claude_port = 7842;
 static WiFiUDP beacon_udp;
 static bool beacon_listening = false;
 
 static String server_url(const char* path) { return String("http://") + claude_host + ":" + claude_port + path; }
 
-// UDP tu PC: "CLAUDE_USAGE 1 <port>" (tim IP) hoac "CLAUDE_EVENT <id>" (Claude Code vua xong / dang cho)
-// Tra ve true neu can lay so lieu ngay
+// UDP tu PC: "CLAUDE_USAGE 1 <port>" (tim IP), "CLAUDE_EVENT <id>" (Claude Code vua xong / dang cho / xin quyen)
+// hoac "CLAUDE_DIRTY" (so lieu doi: bai hat, % usage...). Tra ve true neu can lay so lieu ngay
 static bool check_beacon() {
   bool poll = false;
   int len;
@@ -138,8 +141,9 @@ static bool check_beacon() {
         Serial.printf("Claude server found at %s:%d\n", claude_host, claude_port);
         poll = true;
       }
-    } else if (sscanf(msg, "CLAUDE_EVENT %d", &ev) == 1 && ip == claude_host) {
-      poll = true;  // su kien moi -> lay ngay, khong doi lan poll ke tiep
+    } else if ((sscanf(msg, "CLAUDE_EVENT %d", &ev) == 1 || strncmp(msg, "CLAUDE_DIRTY", 12) == 0) &&
+               ip == claude_host) {
+      poll = true;  // co thay doi -> lay ngay, khong doi lan poll ke tiep
     }
   }
   return poll;
@@ -147,12 +151,16 @@ static bool check_beacon() {
 
 // Giao thuc claudometer: GET /v1/stats, Bearer token, schema 1 (+ event, context, account, pc, media)
 static bool fetch_claude(ScreenState scr) {
+  if (!claude_host[0]) return false;  // chua biet IP PC: doi beacon UDP
   String screens = "home,pc";  // pc luon kem: o System tren Home co so ngay tu luc khoi dong
   if (scr == SCR_MUSIC) screens += ",media";
   JsonDocument doc;
-  bool ok = http_get_json(server_url("/v1/stats?screens=") + screens, doc, CLAUDE_TOKEN, HTTP_TIMEOUT_MS) &&
+  uint32_t t0 = millis();
+  bool ok = http_get_json(server_url("/v1/stats?screens=") + screens, doc, netcfg.token, HTTP_TIMEOUT_MS) &&
             (doc["schema"] | 0) == 1;
+  dev.server_ms = millis() - t0;
   if (!ok) {
+    dev.server_fail++;
     xSemaphoreTake(data_mutex, portMAX_DELAY);
     if (!shared_claude.stale) { shared_claude.stale = true; claude_dirty = true; }
     xSemaphoreGive(data_mutex);
@@ -202,6 +210,24 @@ static bool fetch_claude(ScreenState scr) {
     strlcpy(c.event_project, ev["project"] | "", sizeof(c.event_project));
     strlcpy(c.event_msg, ev["message"] | "", sizeof(c.event_msg));
   }
+
+  JsonObjectConst pm = doc["permission"];
+  if (!pm.isNull()) {
+    c.perm.id = pm["id"] | 0;
+    c.perm.expires_s = pm["expires_in"] | 0;
+    strlcpy(c.perm.tool, pm["tool"] | "", sizeof(c.perm.tool));
+    strlcpy(c.perm.project, pm["project"] | "", sizeof(c.perm.project));
+    strlcpy(c.perm.detail, pm["detail"] | "", sizeof(c.perm.detail));
+  }
+
+  JsonObjectConst cal = doc["calendar"];
+  if (!cal.isNull()) {
+    c.cal.has = true;
+    strlcpy(c.cal.when, cal["when"] | "", sizeof(c.cal.when));
+    strlcpy(c.cal.start, cal["start"] | "", sizeof(c.cal.start));
+    strlcpy(c.cal.title, cal["title"] | "", sizeof(c.cal.title));
+  }
+  c.pc_locked = doc["pc_locked"] | false;
 
   JsonObjectConst pc = doc["pc"];
   if (!pc.isNull()) {
@@ -292,7 +318,7 @@ static void fetch_album_art() {
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
   if (!http.begin(server_url("/v1/media/art"))) return;
-  http.addHeader("Authorization", String("Bearer ") + CLAUDE_TOKEN);
+  http.addHeader("Authorization", String("Bearer ") + netcfg.token);
   const size_t need = sizeof(art_buf[0]);
   bool ok = false;
   if (http.GET() == HTTP_CODE_OK && http.getSize() == (int)need) {
@@ -319,29 +345,42 @@ void network_task(void*) {
   uint32_t next_weather = 0, next_aqi = 0, next_claude = 0;
   uint32_t claude_backoff = CLAUDE_BACKOFF_START;
   int aqi_fails = 0;
-  strlcpy(claude_host, CLAUDE_HOST, sizeof(claude_host));
+  strlcpy(claude_host, netcfg.host, sizeof(claude_host));
+  claude_port = netcfg.port;
+  bool was_connected = false;
 
   for (;;) {
     uint32_t now = millis();
     net_heartbeat = now;
 
     if (WiFi.status() != WL_CONNECTED) {
+      if (was_connected) { dev.wifi_drops++; was_connected = false; }
       if (beacon_listening) { beacon_udp.stop(); beacon_listening = false; }
       if (due(now, next_wifi_retry)) {
         Serial.println("WiFi disconnected, reconnecting...");
         WiFi.reconnect();
         next_wifi_retry = now + WIFI_RETRY_INTERVAL;
+    was_connected = true;
       }
       vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
     next_wifi_retry = now + WIFI_RETRY_INTERVAL;
 
-    // NTP chi bat sau khi WiFi len: goi configTzTime qua som lam lwIP assert (ESP32 core 3.x)
+    // NTP chi bat sau khi WiFi len (goi som lam lwIP assert). Va dua san IP cho SNTP: neu SNTP tu tra DNS
+    // dung luc HTTPClient tra DNS thi core 3.x assert "sys_untimeout ... lock TCPIP core" va khoi dong lai.
     static bool ntp_started = false;
     if (!ntp_started) {
-      configTzTime(TIMEZONE, NTP_SERVER);
-      ntp_started = true;
+      static char ntp_a[16], ntp_b[16];   // SNTP giu con tro, khong chep chuoi
+      IPAddress a, b;
+      bool ok_a = WiFi.hostByName(NTP_SERVER, a) == 1;
+      bool ok_b = WiFi.hostByName("time.google.com", b) == 1;
+      if (ok_a || ok_b) {
+        strlcpy(ntp_a, (ok_a ? a : b).toString().c_str(), sizeof(ntp_a));
+        strlcpy(ntp_b, (ok_b ? b : a).toString().c_str(), sizeof(ntp_b));
+        configTzTime(netcfg.tz, ntp_a, ntp_b);
+        ntp_started = true;
+      }
     }
 
     if (claude_enabled()) {
@@ -354,8 +393,16 @@ void network_task(void*) {
       if (act) {  // nut Music: gui lenh roi lay trang thai moi
         media_action = 0;
         const char* name = act == 1 ? "toggle" : act == 2 ? "next" : "prev";
-        http_post_json(server_url("/v1/media"), String("{\"action\":\"") + name + "\"}", CLAUDE_TOKEN);
+        http_post_json(server_url("/v1/media"), String("{\"action\":\"") + name + "\"}", netcfg.token);
         vTaskDelay(pdMS_TO_TICKS(300));  // de app nhac kip doi bai / trang thai
+        next_claude = millis();
+      }
+      int pid = perm_answer_id;
+      if (pid) {  // the xin quyen: gui Allow / Deny cho PC (hook Claude Code dang cho)
+        const char* d = perm_answer == 1 ? "allow" : "deny";
+        http_post_json(server_url("/v1/permission"), String("{\"id\":") + pid + ",\"decision\":\"" + d + "\"}",
+                       netcfg.token);
+        perm_answer_id = 0;
         next_claude = millis();
       }
       if (claude_poll_now) { claude_poll_now = false; next_claude = now; }
@@ -363,7 +410,12 @@ void network_task(void*) {
         ScreenState scr = current_screen;
         if (fetch_claude(scr)) {
           claude_backoff = CLAUDE_BACKOFF_START;
-          uint32_t iv = scr == SCR_MUSIC ? MEDIA_POLL_ACTIVE : scr == SCR_PC ? PC_POLL_ACTIVE
+          bool perm_pending;
+          xSemaphoreTake(data_mutex, portMAX_DELAY);
+          perm_pending = shared_claude.perm.id != 0;
+          xSemaphoreGive(data_mutex);
+          uint32_t iv = perm_pending ? PERM_POLL_ACTIVE : scr == SCR_MUSIC ? MEDIA_POLL_ACTIVE
+                      : scr == SCR_PC ? PC_POLL_ACTIVE
                       : (scr == SCR_CLAUDE || scr == SCR_ACCOUNT) ? CLAUDE_POLL_ACTIVE : CLAUDE_POLL_IDLE;
           next_claude = millis() + iv;
           if (scr == SCR_MUSIC) fetch_album_art();

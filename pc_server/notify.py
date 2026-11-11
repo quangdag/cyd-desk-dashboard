@@ -73,6 +73,11 @@ def main():
             token = m.group(1) if m else ""
         except OSError:
             pass
+    if not token:  # no secrets.h: the server made token.txt on its first start
+        try:
+            token = (HERE / "token.txt").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
 
     duration = turn_duration(hook.get("transcript_path")) if kind == "stop" else -1
     body = json.dumps({"type": kind, "project": project, "message": message, "duration_s": duration}).encode()

@@ -2,3 +2,5 @@ ESP32_tft_clock_weather/secrets.h
 __pycache__/
 pc_server/server.log
 pc_server/calibration.json
+pc_server/token.txt
+pc_server/calendar.txt
