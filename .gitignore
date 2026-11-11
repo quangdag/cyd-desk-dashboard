@@ -6,3 +6,4 @@ pc_server/token.txt
 pc_server/calendar.txt
 .build/
 local.mk
+pc_server/usage_cache.json

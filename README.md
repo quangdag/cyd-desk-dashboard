@@ -42,9 +42,11 @@ A small Python server on the laptop feeds it data.
 | **Settings** | Sound, notification mode, slideshow speed, alerts, screen mode (always on / off while the PC is locked or asleep) |
 | **Device** | Frame render time, free and lowest RAM, Wi-Fi signal and drops, server and weather API latency, uptime |
 
-**Notifications** – a Claude Code hook tells the device when Claude finishes or needs permission. In *away* mode it
-only alerts when I've been idle for a minute or the task ran for two, so it stays quiet while I'm at the desk.
-It also warns at 80% / 95% session usage, when the quota resets, and when rain is likely in the next two hours.
+**Notifications** – a Claude Code hook tells the device when Claude finishes or needs permission. The "Claude is done"
+card shows how long the turn took, the project and the first two lines of Claude's final reply (markdown stripped).
+In *away* mode it only alerts when I've been idle for a minute or the task ran for two, so it stays quiet while I'm at
+the desk. It also warns at 80% / 95% session and 80% weekly usage (exact numbers only, never estimates), when the
+quota resets, and when rain is likely in the next two hours.
 
 **Approve from the desk** – a `PermissionRequest` hook routes Claude Code's permission prompts to the CYD when I've
 been away from the keyboard for a minute. The card shows the project, tool and command with **Deny** / **Allow** and a
@@ -101,7 +103,9 @@ flowchart LR
   CYD then fetches `GET /v1/stats`. Polling only remains as a safety net (10–60 s instead of 2–5 s).
 - **PC server** – single-file Python (standard library, plus `winrt` for media). Serves the
   [claudometer](https://github.com/krizdingus/claudometer) schema plus permission, calendar and lock-state fields,
-  reads exact usage from Anthropic's OAuth usage endpoint (falls back to estimates from local logs) and lets the
+  reads exact usage from Anthropic's OAuth usage endpoint and shows it as fetched (the last value is cached on disk,
+  so a restart doesn't serve an estimate). When Anthropic can't be reached it falls back to an estimate from local
+  logs, whose dollar caps re-calibrate themselves from every exact reading. It also lets the
   official Claude CLI renew its login. `ensure_server.py` starts it at login and whenever Claude Code starts, and does
   nothing if it is already running. Measured cost: about 0.015 % CPU and 38 MB RAM in the busiest case.
 - **Discovery** – the server broadcasts its address over UDP, so the device follows the laptop when its IP changes.

@@ -216,7 +216,8 @@ Sửa đường dẫn cho đúng máy bạn; trong JSON phải viết `\\` thay 
 
 Nếu file đã có sẵn nội dung khác, chỉ thêm phần `"hooks"` vào, đừng xoá phần cũ. Mở phiên Claude Code mới để hook có hiệu lực.
 
-- `Stop` / `Notification`: thẻ thông báo khi Claude xong việc hoặc đang chờ bạn.
+- `Stop` / `Notification`: thẻ thông báo khi Claude xong việc hoặc đang chờ bạn. Thẻ "Claude is done" hiện thời gian
+  chạy, tên dự án và 2 dòng đầu câu trả lời cuối của Claude.
 - `PermissionRequest`: duyệt quyền trên CYD khi bạn vắng mặt. Hook này **không** có `async` vì Claude Code phải chờ câu trả lời.
 - `SessionStart`: bật server mỗi khi mở Claude Code nếu server chưa chạy.
 
@@ -246,7 +247,7 @@ Tab Clock hiện sự kiện đang diễn ra (**NOW**), sắp tới hôm nay (**
 |---|---|
 | `--plan pro` | Gói Claude (dùng khi tính % ước tính) |
 | `--reset-weekday 5 --reset-hour 2` | Giờ đặt lại hạn mức tuần cho chế độ ước tính (0 = thứ Hai … 6 = Chủ nhật) |
-| `--calibrate 16 17` | Chỉnh % ước tính cho khớp claude.ai: truyền vào % phiên và % tuần claude.ai đang hiện |
+| `--calibrate 16 17` | Chỉnh % ước tính cho khớp claude.ai: truyền vào % phiên và % tuần claude.ai đang hiện. Khi đã `claude auth login`, server tự chỉnh mỗi lần lấy được số chính xác, không cần lệnh này |
 | `--ics URL` | Lịch hẹn (thay cho `calendar.txt`) |
 | `--token abc` | Token tự chọn (thay cho `token.txt`) |
 | `--no-exact` | Không hỏi Anthropic, chỉ ước tính từ log |

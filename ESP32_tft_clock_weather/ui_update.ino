@@ -380,6 +380,11 @@ static void handle_claude_event(const ClaudeData& c) {
   }
   bool away = c.event_idle >= NOTIFY_AWAY_IDLE_S || c.event_duration >= NOTIFY_AWAY_TASK_S;
   if (settings.notify == NOTIFY_AWAY && !away) return;
+  if (c.event_msg[0]) {  // server sent the start of Claude's reply (pc_server/notify.py)
+    show_done_toast(c.event_project, c.event_duration, c.event_msg);
+    beep(BEEP_DONE);
+    return;
+  }
   if (c.event_duration >= 60) snprintf(sub, sizeof(sub), "%s | took %dm %02ds", c.event_project, c.event_duration / 60, c.event_duration % 60);
   else snprintf(sub, sizeof(sub), "%s | tap to dismiss", c.event_project);
   show_toast(LV_SYMBOL_OK " Claude is done", sub, C_OK);
@@ -391,7 +396,8 @@ static void check_quota_alerts(const ClaudeData& c) {
   static int last_session = -1;
   static char last_resets[8] = "";
   static bool warned80 = false, warned95 = false, warned_week = false;
-  if (!c.exact && !c.valid) return;
+  // Only exact numbers from Anthropic: a log-based estimate can read 100% at 56% real (seen 2026-11-11)
+  if (!c.valid || !c.exact) return;
   if (last_session < 0) {  // lan dau sau khi bat may: chi ghi nhan, khong bao
     warned80 = c.session_pct >= 80;
     warned95 = c.session_pct >= 95;

@@ -26,10 +26,7 @@ def turn_duration(transcript_path: str) -> int:
     Reads only the tail of the transcript so it stays fast on long sessions."""
     from datetime import datetime, timezone
     try:
-        with open(transcript_path, "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - 4 * 1024 * 1024))
-            lines = f.read().decode("utf-8", "replace").splitlines()
+        lines = _tail_lines(transcript_path)
     except (OSError, TypeError):
         return -1
     for line in reversed(lines):
@@ -52,6 +49,53 @@ def turn_duration(transcript_path: str) -> int:
             return -1
         return max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
     return -1
+
+
+def _tail_lines(transcript_path: str, max_bytes: int = 4 * 1024 * 1024) -> list[str]:
+    with open(transcript_path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - max_bytes))
+        return f.read().decode("utf-8", "replace").splitlines()
+
+
+# Markdown that would show as stray symbols on the CYD, and arrows the CYD fonts don't have
+_MD = [(re.compile(r"```.*?```", re.S), " "), (re.compile(r"^\s{0,3}#{1,6}\s.*$", re.M), ""),  # code, headings
+       (re.compile(r"`([^`]*)`"), r"\1"),
+       (re.compile(r"\[([^\]]*)\]\([^)]*\)"), r"\1"), (re.compile(r"(\*\*|__|\*|~~)"), ""),
+       (re.compile(r"^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+\.\s+|\|)", re.M), ""), (re.compile(r"\s*\|\s*"), " "),
+       (re.compile("[→⇒]"), "->"), (re.compile("[←⇐]"), "<-"),
+       (re.compile("[–—]"), "-"), (re.compile(r"\s+"), " ")]
+
+
+def plain_text(md: str) -> str:
+    for pattern, repl in _MD:
+        md = pattern.sub(repl, md)
+    return md.strip()
+
+
+def last_reply(transcript_path: str, limit: int = 300) -> str:
+    """Start of Claude's final text in the turn that just ended, as plain text ('' if none).
+    The CYD shows its first two lines on the "Claude is done" card."""
+    try:
+        lines = _tail_lines(transcript_path, 2 * 1024 * 1024)
+    except (OSError, TypeError):
+        return ""
+    for line in reversed(lines):
+        if '"assistant"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = (obj.get("message") or {}).get("content")
+        texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"] \
+            if isinstance(content, list) else [content] if isinstance(content, str) else []
+        text = plain_text(" ".join(t for t in texts if t))
+        if text:
+            return text[:limit]
+    return ""
 
 
 def main():
@@ -80,6 +124,8 @@ def main():
             pass
 
     duration = turn_duration(hook.get("transcript_path")) if kind == "stop" else -1
+    if kind == "stop" and not message:  # what Claude said at the end -> shown on the CYD card
+        message = last_reply(hook.get("transcript_path"))
     body = json.dumps({"type": kind, "project": project, "message": message, "duration_s": duration}).encode()
     req = urllib.request.Request("http://127.0.0.1:7842/v1/event", data=body, method="POST",
                                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"})

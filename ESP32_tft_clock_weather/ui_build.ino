@@ -807,19 +807,64 @@ void create_toast() {
   toast_title = make_label(toast, &lv_font_montserrat_20, C_FG, "");
   lv_obj_set_pos(toast_title, 0, 0);
   toast_sub = make_label(toast, &lv_font_montserrat_14, C_MUTED, "");
-  lv_obj_set_width(toast_sub, 274);
+  // One line: "..." only works with a fixed height (a long sub used to wrap over the card's border)
+  lv_obj_set_size(toast_sub, 274, lv_font_get_line_height(&lv_font_montserrat_14));
   lv_label_set_long_mode(toast_sub, LV_LABEL_LONG_DOT);
   lv_obj_set_pos(toast_sub, 0, 32);
+  // "Claude is done": time top right, project in small caps, then the first two lines of Claude's reply
+  toast_time = make_label(toast, &lv_font_montserrat_14, C_MUTED, "");
+  lv_obj_align(toast_time, LV_ALIGN_TOP_RIGHT, 0, 3);
+  toast_proj = make_caps(toast, C_MUTED, "");
+  lv_obj_set_width(toast_proj, 274);
+  lv_label_set_long_mode(toast_proj, LV_LABEL_LONG_DOT);
+  lv_obj_set_pos(toast_proj, 0, 26);
+  toast_body = make_label(toast, &mont_vi_14, C_FG, "");   // Vietnamese replies need the _vi font
+  lv_obj_set_size(toast_body, 274, 2 * lv_font_get_line_height(&mont_vi_14));
+  lv_label_set_long_mode(toast_body, LV_LABEL_LONG_DOT);
+  lv_obj_set_pos(toast_body, 0, 44);
+  lv_obj_add_flag(toast_time, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(toast_proj, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(toast_body, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
 }
 
-static void show_toast(const char* t, const char* sub, uint32_t color) {
-  lv_label_set_text(toast_title, t);
-  lv_label_set_text(toast_sub, sub);
+static void present_toast(uint32_t color) {
   lv_obj_set_style_border_color(toast, lv_color_hex(color), 0);
   lv_obj_remove_flag(toast, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(toast);
   toast_hide_at = millis() + TOAST_MS;
+}
+
+// Thong bao thuong: tieu de + 1 dong (the 300x80)
+static void show_toast(const char* t, const char* sub, uint32_t color) {
+  lv_obj_set_height(toast, 80);
+  lv_obj_add_flag(toast_time, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(toast_proj, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(toast_body, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(toast_sub, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(toast_title, t);
+  lv_label_set_text(toast_sub, sub);
+  present_toast(color);
+}
+
+// "Claude is done" co noi dung tra loi (the 300x112, mockup B duyet 2026-11-11)
+static void show_done_toast(const char* project, int duration_s, const char* reply) {
+  char buf[48];
+  lv_obj_set_height(toast, 112);
+  lv_obj_add_flag(toast_sub, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(toast_title, LV_SYMBOL_OK " Claude is done");
+  if (duration_s >= 60) snprintf(buf, sizeof(buf), "%dm %02ds", duration_s / 60, duration_s % 60);
+  else if (duration_s >= 0) snprintf(buf, sizeof(buf), "%ds", duration_s);
+  else buf[0] = '\0';
+  lv_label_set_text(toast_time, buf);
+  strlcpy(buf, project, sizeof(buf));
+  for (char* p = buf; *p; p++) *p = toupper((unsigned char)*p);   // ASCII only, UTF-8 bytes stay as they are
+  lv_label_set_text(toast_proj, buf);
+  lv_label_set_text(toast_body, reply);
+  lv_obj_remove_flag(toast_time, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(toast_proj, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(toast_body, LV_OBJ_FLAG_HIDDEN);
+  present_toast(C_OK);
 }
 
 // ---- The xin quyen Claude Code: Deny / Allow (chi hien khi ban vang mat, xem pc_server/permission.py) ----

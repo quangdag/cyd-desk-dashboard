@@ -68,6 +68,14 @@ K_KEY, K_TS, K_MODEL, K_IN, K_OUT, K_CREAD, K_CWRITE, K_SIDECHAIN, K_PROJECT = r
 CONTEXT_MAX_AGE = timedelta(hours=12)   # older main-chat turns -> no "current" session to show
 
 
+def clip_utf8(text: str, max_bytes: int) -> str:
+    """At most max_bytes of UTF-8 (a C buffer of max_bytes + 1 on the CYD), cut between whole characters."""
+    data = (text or "").encode("utf-8")
+    if len(data) <= max_bytes:
+        return text or ""
+    return data[:max_bytes].decode("utf-8", "ignore")
+
+
 def parse_ts(value):
     if not isinstance(value, str) or not value:
         return None
@@ -268,6 +276,53 @@ def calibrate(store: LogStore, args, session_pct: float, week_pct: float):
     print(json.dumps(data, indent=2))
 
 
+# Keep the dollar caps in step with Anthropic's exact numbers, so the estimate used when Anthropic can't be reached
+# (offline, rate limited, logged out) stays realistic. A cap measured once drifts: on 2026-11-11 the stored $244/week
+# was 5-8x too small and the fallback estimate read 100% at 56% real.
+RECAL_MIN_PCT = 5          # below this the rounding of the % makes the implied cap too noisy
+RECAL_MIN_CHANGE = 0.15    # rewrite only when the cap moves by more than 15 %
+RECAL_EVERY_S = 600
+RECAL_MAX_AGE_S = 600      # only from a fresh fetch
+_recal = {"at": -RECAL_EVERY_S}
+
+
+def implied_caps(u: dict, snap: dict) -> dict:
+    """Dollar caps implied by local log cost and the exact % right now: cap = cost / (pct / 100)."""
+    caps = {}
+    if snap["week_pct"] >= RECAL_MIN_PCT and u["week_cost"] > 0:
+        caps["weekly_cap_usd"] = u["week_cost"] * 100 / snap["week_pct"]
+    active = u["active"]
+    if active and snap["session_pct"] >= RECAL_MIN_PCT and active["cost"] > 0:
+        caps["session_cap_usd"] = active["cost"] * 100 / snap["session_pct"]
+    return caps
+
+
+def maybe_recalibrate(path: Path, u: dict, snap: dict) -> bool:
+    now = time.monotonic()
+    age = (datetime.now().astimezone() - snap["fetched_at"]).total_seconds()
+    if now - _recal["at"] < RECAL_EVERY_S or age > RECAL_MAX_AGE_S:
+        return False
+    data = dict(load_calibration(path))
+    changed = {}
+    for key, cap in implied_caps(u, snap).items():
+        old = data.get(key) or 0
+        if not old or abs(cap - old) / old > RECAL_MIN_CHANGE:
+            changed[key] = (old, cap)
+            data[key] = cap
+    _recal["at"] = now
+    if not changed:
+        return False
+    data["calibrated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    data["calibrated_with"] = {"session_pct": snap["session_pct"], "week_pct": snap["week_pct"], "auto": True}
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        return False
+    print(f"{datetime.now():%H:%M:%S} calibration updated from exact usage: " +
+          ", ".join(f"{k} ${a:.0f} -> ${b:.0f}" for k, (a, b) in changed.items()), file=sys.stderr)
+    return True
+
+
 # ---- Exact usage from Anthropic ----------------------------------------------
 # Same source as Claude Code's /usage: GET api.anthropic.com/api/oauth/usage with the
 # CLI's own login (~/.claude/.credentials.json, written by `claude auth login`).
@@ -298,9 +353,10 @@ def _parse_iso(value):
 
 
 class ExactUsage:
-    def __init__(self, creds_path: Path, interval_s: int):
+    def __init__(self, creds_path: Path, interval_s: int, cache_path: Path | None = None):
         self.creds_path = creds_path
         self.interval_s = interval_s
+        self.cache_path = cache_path  # last exact numbers, so a restart doesn't serve a raw estimate meanwhile
         self.lock = threading.Lock()
         self.busy = False
         self.last_try = 0.0
@@ -309,6 +365,33 @@ class ExactUsage:
         self.block_until = 0.0        # monotonic time before which we don't ask again (rate limit)
         self.backoff = 0
         self.cli_refresh_at = -CLI_REFRESH_MIN_S
+        self._load_cache()
+
+    # -- cache: the snapshot survives a server restart (used while still fresh, see current()) --
+    _TIME_KEYS = ("fetched_at", "session_resets", "week_resets")
+
+    def _save_cache(self, snap: dict):
+        if not self.cache_path:
+            return
+        data = {k: (v.isoformat() if k in self._TIME_KEYS and v else v) for k, v in snap.items()}
+        try:
+            self.cache_path.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_cache(self):
+        if not self.cache_path:
+            return
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            for k in self._TIME_KEYS:
+                data[k] = _parse_iso(data.get(k))
+            if not isinstance(data["fetched_at"], datetime):
+                return
+            float(data["session_pct"]), float(data["week_pct"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return  # missing or damaged cache: start without it, as before
+        self.snapshot = data
 
     # -- credentials --
     def _read_oauth(self) -> dict:
@@ -383,6 +466,7 @@ class ExactUsage:
             with self.lock:
                 first = self.snapshot is None or self.last_error
                 self.snapshot, self.last_error = snap, ""
+            self._save_cache(snap)
             if first:
                 print(f"{datetime.now():%H:%M:%S} exact usage OK: session {snap['session_pct']:.0f}%, "
                       f"week {snap['week_pct']:.0f}%", file=sys.stderr)
@@ -449,19 +533,20 @@ def compute_stats(store: LogStore, args, exact: ExactUsage | None = None) -> dic
         session = {"pct_used": 0, "minutes_remaining": 0, "resets_at": "", "models": []}
     week_resets_in = fmt_duration(week_end - now)
 
-    # Exact numbers from Anthropic override the estimate; local log cost moves them in between fetches.
+    # Exact numbers from Anthropic override the estimate. They are shown as fetched (every --exact-interval):
+    # extrapolating with local log cost overshot 5-8x, because the % also counts claude.ai chat use and the
+    # dollar caps drift, so the CYD jumped up and back. Only a window that has reset since the fetch drops to 0.
     snap = exact.current() if exact else None
     if snap:
-        def roll(pct0, resets, cap):
-            if resets and resets <= now:   # window rolled over since the fetch
-                base, since, resets = 0.0, resets, None
-            else:
-                base, since = pct0, snap["fetched_at"]
-            delta = sum(cost_usd(r) for r in recs if r[K_TS] > since)
-            return pct(base + (delta * 100 / cap if cap else 0), 100), resets
+        maybe_recalibrate(args.calibration, u, snap)
 
-        s_pct, s_res = roll(snap["session_pct"], snap["session_resets"], cal.get("session_cap_usd"))
-        w_pct, w_res = roll(snap["week_pct"], snap["week_resets"], cal.get("weekly_cap_usd"))
+        def roll(pct0, resets):
+            if resets and resets <= now:   # window rolled over since the fetch
+                return 0, None
+            return pct(pct0, 100), resets
+
+        s_pct, s_res = roll(snap["session_pct"], snap["session_resets"])
+        w_pct, w_res = roll(snap["week_pct"], snap["week_resets"])
         session["pct_used"] = s_pct
         session["resets_at"] = (s_res + timedelta(seconds=30)).strftime("%H:%M") if s_res else ""  # 00:29:59 -> 00:30
         session["minutes_remaining"] = int((s_res - now).total_seconds() // 60) if s_res else 0
@@ -1295,7 +1380,9 @@ class StatsServer(ThreadingHTTPServer):
     def push_event(self, kind: str, project: str, message: str, duration_s: int = -1):
         self.event_id += 1
         # idle_s: how long you've been away from mouse/keyboard -> the CYD can stay quiet while you're at the PC
-        self.event = {"id": self.event_id, "type": kind, "project": project[:40], "message": message[:120],
+        # Byte limits match the CYD's buffers (event_project[41], event_msg[161]); never cut inside a UTF-8 letter
+        self.event = {"id": self.event_id, "type": kind, "project": clip_utf8(project, 40),
+                      "message": clip_utf8(unicodedata.normalize("NFC", message), 160),
                       "duration_s": int(duration_s), "idle_s": int(user_idle_seconds()), "ts": time.time()}
         print(f"{datetime.now():%H:%M:%S} event {kind} {project!r}", file=sys.stderr)
         if not self.args.no_beacon:  # tell the CYD right away instead of waiting for its next poll
@@ -1513,6 +1600,8 @@ def main():
     ap.add_argument("--context-limit", type=int, default=1_000_000, help="context window size shown on the CYD")
     ap.add_argument("--no-exact", action="store_true", help="never ask Anthropic, only estimate from logs")
     ap.add_argument("--exact-interval", type=int, default=120, help="seconds between Anthropic usage fetches")
+    ap.add_argument("--usage-cache", type=Path, default=here / "usage_cache.json",
+                    help="last exact usage, reused for up to 30 min after a restart")
     ap.add_argument("--credentials", type=Path, default=Path.home() / ".claude" / ".credentials.json",
                     help="Claude Code CLI login file (created by: claude auth login)")
     ap.add_argument("--ics", default=os.environ.get("CYD_ICS", ""),
@@ -1526,7 +1615,7 @@ def main():
         print(f"--- start {datetime.now():%Y-%m-%d %H:%M:%S}")
 
     store = LogStore(args.claude_dir)
-    exact = None if args.no_exact else ExactUsage(args.credentials, max(args.exact_interval, 30))
+    exact = None if args.no_exact else ExactUsage(args.credentials, max(args.exact_interval, 30), args.usage_cache)
     if args.calibrate:
         calibrate(store, args, *args.calibrate)
         return

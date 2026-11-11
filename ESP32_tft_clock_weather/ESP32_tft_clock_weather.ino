@@ -238,6 +238,7 @@ static unsigned long wake_until = 0, pc_seen_ms = 0;
 static bool swallow_touch = false;
 // Toast
 static lv_obj_t *toast, *toast_title, *toast_sub;
+static lv_obj_t *toast_time, *toast_proj, *toast_body;   // the "Claude is done" card: time, project, reply
 static unsigned long toast_hide_at = 0;
 
 // Pomodoro (do dai moi pha luu trong NVS)

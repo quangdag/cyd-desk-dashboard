@@ -116,7 +116,7 @@ struct ClaudeData {
   char plan[16] = "";
   long ctx_tokens = -1, ctx_limit = 0;  // ngu canh phien Claude Code gan nhat (-1 = khong co)
   int event_id = 0, event_age = 0, event_idle = 0, event_duration = -1;
-  char event_type[16] = "", event_project[41] = "", event_msg[121] = "";
+  char event_type[16] = "", event_project[41] = "", event_msg[161] = "";
   PcData pc;
   MediaData media;
   AccountData account;

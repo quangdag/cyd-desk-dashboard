@@ -1,4 +1,5 @@
 """Tests for the PC server pieces that don't need Windows or a CYD.  python -m unittest discover pc_server/tests"""
+import json
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import claude_usage_server as srv  # noqa: E402
 import ensure_server  # noqa: E402
+import notify  # noqa: E402
 import permission  # noqa: E402
 
 TZ = datetime.now().astimezone().tzinfo
@@ -169,6 +171,120 @@ class HookAndMediaHelpers(unittest.TestCase):
             first = srv.token_from_file(path, create=True)
             self.assertGreaterEqual(len(first), 12)
             self.assertEqual(srv.token_from_file(path, create=True), first)
+
+
+class FakeStore:
+    def __init__(self, recs):
+        self.recs = recs
+
+    def records_since(self, since):
+        return [r for r in self.recs if r[srv.K_TS] >= since]
+
+
+def opus_rec(ts: datetime, out_tokens: int, key: str):
+    # (key, ts, model, in, out, cache_read, cache_write, sidechain, project)
+    return ((key, key), ts, "claude-opus", 0, out_tokens, 0, 0, False, "proj")
+
+
+def stats_args(cal_path: Path):
+    import argparse
+    return argparse.Namespace(plan="pro", session_cap=0, weekly_cap=0, calibration=cal_path, reset_weekday=0,
+                              reset_hour=0, context_limit=1_000_000)
+
+
+class ExactUsageNumbers(unittest.TestCase):
+    """The CYD must show Anthropic's exact numbers, not an estimate that runs 5-8x ahead (seen 2026-11-11)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.cal = Path(self.dir.name) / "calibration.json"
+        self.cal.write_text('{"session_cap_usd": 10, "weekly_cap_usd": 20}', encoding="utf-8")  # far too small
+        srv._recal["at"] = -srv.RECAL_EVERY_S
+        self.now = datetime.now().astimezone()
+
+    def tearDown(self):
+        srv._cal_cache.update({"mtime": None, "data": {}})
+        self.dir.cleanup()
+
+    def snap(self, fetched_ago_s=60, week=56.0, session=31.0, week_resets_in_h=60):
+        return {"fetched_at": self.now - timedelta(seconds=fetched_ago_s), "session_pct": session,
+                "session_resets": self.now + timedelta(hours=2), "week_pct": week,
+                "week_resets": self.now + timedelta(hours=week_resets_in_h), "breakdown": [], "extra": {}}
+
+    def stats(self, snap, recs):
+        exact = mock.Mock()
+        exact.current.return_value = snap
+        return srv.compute_stats(FakeStore(recs), stats_args(self.cal), exact)
+
+    def test_spending_after_the_fetch_does_not_inflate_the_numbers(self):
+        recs = [opus_rec(self.now - timedelta(seconds=10), 200_000, "a")]   # $15 after the fetch
+        d = self.stats(self.snap(), recs)
+        self.assertEqual(d["budgets"]["code_all"], 56)
+        self.assertEqual(d["session"]["pct_used"], 31)
+        self.assertEqual(d["source"], "exact")
+
+    def test_week_that_reset_since_the_fetch_shows_zero(self):
+        d = self.stats(self.snap(week_resets_in_h=-1), [])
+        self.assertEqual(d["budgets"]["code_all"], 0)
+
+    def test_caps_recalibrate_from_exact_numbers(self):
+        # $150 of Opus output this week at 50% real -> 100% = $300 (the stored $20 was far too small)
+        recs = [opus_rec(self.now - timedelta(minutes=30), 2_000_000, "b")]
+        self.stats(self.snap(week=50.0, session=50.0), recs)
+        data = json.loads(self.cal.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(data["weekly_cap_usd"], 300, delta=1)
+        self.assertAlmostEqual(data["session_cap_usd"], 300, delta=1)
+        self.assertTrue(data["calibrated_with"]["auto"])
+
+    def test_small_drift_does_not_rewrite_the_file(self):
+        self.cal.write_text('{"session_cap_usd": 300, "weekly_cap_usd": 310}', encoding="utf-8")
+        recs = [opus_rec(self.now - timedelta(minutes=30), 2_000_000, "c")]
+        u = srv.usage_now(FakeStore(recs), stats_args(self.cal))
+        self.assertFalse(srv.maybe_recalibrate(self.cal, u, self.snap(week=50.0, session=50.0)))
+
+    def test_stale_or_tiny_numbers_never_recalibrate(self):
+        recs = [opus_rec(self.now - timedelta(minutes=30), 2_000_000, "d")]
+        u = srv.usage_now(FakeStore(recs), stats_args(self.cal))
+        self.assertFalse(srv.maybe_recalibrate(self.cal, u, self.snap(fetched_ago_s=3600, week=50.0)))
+        self.assertEqual(srv.implied_caps(u, self.snap(week=2.0, session=1.0)), {})
+
+    def test_exact_snapshot_survives_a_restart(self):
+        cache = Path(self.dir.name) / "usage_cache.json"
+        first = srv.ExactUsage(Path("missing.json"), 120, cache)
+        first._save_cache(self.snap())
+        again = srv.ExactUsage(Path("missing.json"), 120, cache)
+        self.assertEqual(again.current()["week_pct"], 56.0)
+        cache.write_text("{damaged", encoding="utf-8")
+        self.assertIsNone(srv.ExactUsage(Path("missing.json"), 120, cache).current())
+
+    def test_old_cached_snapshot_is_not_used(self):
+        cache = Path(self.dir.name) / "usage_cache.json"
+        srv.ExactUsage(Path("missing.json"), 120, cache)._save_cache(self.snap(fetched_ago_s=srv.EXACT_MAX_AGE_S + 60))
+        self.assertIsNone(srv.ExactUsage(Path("missing.json"), 120, cache).current())
+
+
+class DoneCardText(unittest.TestCase):
+    def test_clip_utf8_never_cuts_a_letter(self):
+        text = "Đã sửa xong lỗi"
+        for n in range(1, 25):
+            clipped = srv.clip_utf8(text, n)
+            self.assertLessEqual(len(clipped.encode("utf-8")), n)
+            self.assertTrue(text.startswith(clipped))
+
+    def test_last_reply_is_the_final_main_chat_text_without_markdown(self):
+        lines = [
+            {"type": "user", "message": {"content": "sửa lỗi"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Đang xem..."}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "## Xong\n- **Đã sửa** `ensure_server.py` → chạy ổn"}]}},
+            {"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "text", "text": "subagent"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in lines), encoding="utf-8")
+            self.assertEqual(notify.last_reply(str(path)), "Đã sửa ensure_server.py -> chạy ổn")  # heading dropped
+        self.assertEqual(notify.last_reply("does-not-exist.jsonl"), "")
 
 
 class EnsureServerLaunch(unittest.TestCase):
