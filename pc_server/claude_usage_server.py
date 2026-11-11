@@ -38,7 +38,7 @@ from pathlib import Path
 import unicodedata
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 
 # (session block tokens, weekly all-models, weekly opus-only) - from claudometer planinfo.go
 PLAN_CAPS = {
