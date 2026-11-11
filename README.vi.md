@@ -318,6 +318,7 @@ Gõ `make` (Windows: `mingw32-make`) để xem danh sách. Hay dùng nhất:
 - `make bench`: đo thời gian vẽ lại cả màn.
 - `make log`: xem log Serial, ví dụ điện thoại có gọi tới trang setup không.
 - `make server-restart`: khởi động lại server sau khi sửa `calendar.txt`.
+- `make server-status`: server có đang chạy không, có bị tắt theo phiên Claude Code không (CYD báo OFFLINE thì xem đầu tiên).
 - `make check`: chạy test và quét bí mật trước khi push.
 - `make version V=2.0.4`: đổi số phiên bản ở mọi nơi.
 
@@ -343,7 +344,7 @@ SERVER_ARGS = --plan pro --reset-weekday 5 --reset-hour 2
 | Điện thoại không thấy WiFi **CYD-Setup** | CYD chưa ở trang WI-FI SETUP: HOME → ⚙ → **WI-FI SETUP**. WiFi xuất hiện sau khoảng 5 giây (CYD quét WiFi nhà trước) |
 | Đã vào **CYD-Setup** nhưng trang không tự mở | Mở trình duyệt, gõ **192.168.4.1**. Muốn xem CYD có nhận được yêu cầu không: mở Serial Monitor 115200, mỗi lần điện thoại gọi tới sẽ có dòng `Setup page` / `Setup redirect` |
 | Không có giờ, không có thời tiết | Kiểm tra tên/mật khẩu WiFi ở trang Wi-Fi setup; CYD chỉ bắt WiFi **2,4 GHz** |
-| Tab Claude báo **PC OFFLINE** | Server chưa chạy; tường lửa đang chặn (cho phép Private network); máy tính và CYD phải cùng mạng WiFi; token ở CYD phải trùng `token.txt` |
+| Tab Claude báo **PC OFFLINE** (hoặc **PRO OFFLINE**) | Chạy `make server-status`. Nếu báo server không chạy, hoặc chạy "inside a job" (bị tắt theo phiên Claude Code), thì chạy `make server-restart`. Nếu server vẫn chạy bình thường thì kiểm tra: tường lửa (cho phép Private network); máy tính và CYD cùng mạng WiFi; token ở CYD trùng `token.txt` |
 | Chấm **vàng** mãi không xanh | Chạy `claude auth login`; nếu `server.log` có `HTTP 429` thì chờ vài phút, server tự thử lại |
 | Tab Account báo *needs claude auth login*, góc phải hiện `~EST` | Server tự nhờ Claude CLI gia hạn đăng nhập; nếu vẫn báo thì đăng nhập lại CLI: `claude auth login` |
 | Tab Music báo *Media reader unavailable* | Chưa cài các gói `winrt-...` ở Phần 2, bước 1 |

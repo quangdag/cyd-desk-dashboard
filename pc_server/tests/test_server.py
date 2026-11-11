@@ -1,5 +1,7 @@
 """Tests for the PC server pieces that don't need Windows or a CYD.  python -m unittest discover pc_server/tests"""
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -9,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import claude_usage_server as srv  # noqa: E402
+import ensure_server  # noqa: E402
 import permission  # noqa: E402
 
 TZ = datetime.now().astimezone().tzinfo
@@ -166,6 +169,59 @@ class HookAndMediaHelpers(unittest.TestCase):
             first = srv.token_from_file(path, create=True)
             self.assertGreaterEqual(len(first), 12)
             self.assertEqual(srv.token_from_file(path, create=True), first)
+
+
+class EnsureServerLaunch(unittest.TestCase):
+    """The server must not start inside the Claude app's job object, or it stops with that Claude session."""
+
+    CMD = ["C:/Program Files/Python/pythonw.exe", "C:/My Projects/cyd/claude_usage_server.py", "--plan", "pro"]
+
+    def run_launch(self, in_job: bool, breakaway_ok: bool, wmi_ok: bool):
+        calls = []
+
+        def popen(cmd, cwd, extra=0):
+            calls.append(("popen", extra))
+            if extra == ensure_server.BREAKAWAY and not breakaway_ok:
+                raise PermissionError("job forbids breakaway")
+
+        def wmi(cmd, cwd):
+            calls.append(("wmi", 0))
+            return wmi_ok
+
+        how = ensure_server.launch_windows(self.CMD, Path("."), job=lambda: in_job, popen=popen, wmi=wmi)
+        return how, calls
+
+    def test_not_in_a_job_starts_directly(self):
+        how, calls = self.run_launch(in_job=False, breakaway_ok=False, wmi_ok=False)
+        self.assertEqual(how, "direct")
+        self.assertEqual(calls, [("popen", 0)])
+
+    def test_job_that_allows_breakaway(self):
+        how, calls = self.run_launch(in_job=True, breakaway_ok=True, wmi_ok=False)
+        self.assertEqual(how, "breakaway from job")
+        self.assertEqual(calls, [("popen", ensure_server.BREAKAWAY)])
+
+    def test_claude_job_without_breakaway_uses_wmi(self):
+        how, calls = self.run_launch(in_job=True, breakaway_ok=False, wmi_ok=True)
+        self.assertIn("WMI", how)
+        self.assertEqual(calls, [("popen", ensure_server.BREAKAWAY), ("wmi", 0)])  # exactly one server started
+
+    def test_last_resort_still_starts_the_server(self):
+        how, calls = self.run_launch(in_job=True, breakaway_ok=False, wmi_ok=False)
+        self.assertIn("inside the job", how)
+        self.assertEqual(calls[-1], ("popen", 0))
+
+    def test_command_line_keeps_paths_with_spaces_together(self):
+        line = subprocess.list2cmdline(self.CMD)
+        self.assertEqual(line, '"C:/Program Files/Python/pythonw.exe" "C:/My Projects/cyd/claude_usage_server.py" '
+                               "--plan pro")
+
+    def test_launch_is_written_to_the_server_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "server.log"
+            ensure_server.log_line(["--plan", "pro", "--log", str(log)], "WMI (outside the job)")
+            self.assertIn("ensure_server: started WMI (outside the job)", log.read_text(encoding="utf-8"))
+            ensure_server.log_line(["--plan", "pro"], "direct")   # no --log: nothing to write, no error
 
 
 if __name__ == "__main__":

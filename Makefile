@@ -18,7 +18,7 @@ SECS        ?= 60
 
 CAPTURE = $(PY) -I tools/cyd_capture.py $(PORT)
 
-.PHONY: help build upload flash test check stats bench log setup restart tab shot tour server-restart version clean
+.PHONY: help build upload flash test check stats bench log setup restart tab shot tour server-restart server-status version clean
 
 ## Build and device (PORT from local.mk, default COM8):
 ##   make build            compile the firmware into .build/
@@ -32,6 +32,7 @@ CAPTURE = $(PY) -I tools/cyd_capture.py $(PORT)
 ## PC server and repo:
 ##   make test             server unit tests
 ##   make server-restart   restart the PC server, re-reading calendar.txt and token.txt
+##   make server-status    is the server running, and independent of Claude Code? (CYD shows OFFLINE if not)
 ##   make check            tests + secret scan of the commits not pushed yet: run before every push
 ##   make version V=2.0.4  set the version in firmware, server and web manifest
 ##   make clean            remove .build/
@@ -80,6 +81,9 @@ tour:
 
 server-restart:
 	$(PY) -I tools/server_restart.py $(SERVER_ARGS)
+
+server-status:
+	$(PY) -I tools/server_status.py
 
 version:
 	$(PY) -I tools/bump_version.py $(V)

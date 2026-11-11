@@ -72,8 +72,10 @@ opens by itself; if it doesn't, browse to **`http://192.168.4.1`**. To come back
 | **Latitude / Longitude** | Where the weather is for, in decimal degrees | Google Maps → right-click your location → click the numbers at the top of the menu to copy them, e.g. `16.0044, 108.2632`. South and west are negative |
 | **Time zone (POSIX)** | Your zone as a POSIX string | Vietnam / Thailand `ICT-7`, Japan `JST-9`, Singapore `SGT-8`, UK `GMT0BST,M3.5.0/1,M10.5.0`, Central Europe `CET-1CEST,M3.5.0,M10.5.0/3`, US Eastern `EST5EDT,M3.2.0,M11.1.0`. Note the sign: UTC+7 is written `-7` |
 
-**Save and restart**: the CYD joins your Wi-Fi and opens Home. If the PC pages show **PC OFFLINE**, check that the
-token matches `token.txt`, the PC is on the same network and the firewall allows Python on private networks.
+**Save and restart**: the CYD joins your Wi-Fi and opens Home. If the PC pages show **OFFLINE**, run
+`make server-status` first. If the server is not running, or is running inside a job, run `make server-restart`.
+Otherwise check that the token matches `token.txt`, the PC is on the same network and the firewall allows Python on
+private networks.
 
 ## Architecture
 
@@ -108,6 +110,14 @@ flowchart LR
   script; LVGL does no Thai shaping, so the server swaps in raised tone marks where they would hit an upper vowel.
 
 ## Engineering notes
+
+- **A server that died with its parent** – the Claude Code `SessionStart` hook starts the PC server, but the hook
+  runs inside the Claude app's Windows job object. That job forbids `CREATE_BREAKAWAY_FROM_JOB`, so the
+  "detached" server stayed in the job, and Windows stopped it whenever that Claude session closed: the CYD showed
+  OFFLINE. `ensure_server.py` now checks `IsProcessInJob` and, when breakaway is refused, starts the server through
+  WMI (`Win32_Process.Create`). That gives the same user and desktop session but no job. It was verified by running
+  the launcher inside a kill-on-close job without breakaway: the old code's server died with the job, and the new
+  one kept serving. `make server-status` reports which case you are in.
 
 - **lwIP race in ESP32 core 3.x** – SNTP resolving `pool.ntp.org` at the same moment as an `HTTPClient` DNS lookup
   trips `sys_untimeout … Required to lock TCPIP core` and reboots the board. The firmware resolves the NTP servers
@@ -165,6 +175,7 @@ tools/                     font converter, image converter, USB screenshot tool
 - `make log`: serial log.
 - `make tour DIR=screens`: screenshots of every page.
 - `make test` and `make check`: tests, then a secret scan of unpushed commits.
+- `make server-status`: is the PC server running, and independent of Claude Code? Check this first when the CYD shows OFFLINE.
 - `make version V=x.y.z`: sets the version everywhere it is written.
 
 Put your own library path, COM port and server arguments in a `local.mk` (gitignored):
