@@ -158,6 +158,18 @@ tools/                     font converter, image converter, USB screenshot tool
    [README.vi.md](README.vi.md).
 4. Tests: `python -m unittest discover -s pc_server/tests`.
 
+**Makefile shortcuts** (`make`, or `mingw32-make` on Windows, lists them):
+- `make flash`: build and upload.
+- `make stats`: real free RAM, frame time and latencies.
+- `make bench`: full-redraw timing.
+- `make log`: serial log.
+- `make tour DIR=screens`: screenshots of every page.
+- `make test` and `make check`: tests, then a secret scan of unpushed commits.
+- `make version V=x.y.z`: sets the version everywhere it is written.
+
+Put your own library path, COM port and server arguments in a `local.mk` (gitignored):
+`LIBS = …`, `PORT = COM5`, `SERVER_ARGS = --plan max-5x`.
+
 The touch calibration in `ui_build.ino` (`TOUCH_RAW_*`) was measured on my panel; re-measure for another board.
 
 ## Credits

@@ -311,6 +311,24 @@ python tools/cyd_capture.py COM8 shot man-hinh.png
 
 `tour THU-MUC --gif demo.gif` chụp lần lượt mọi trang và ghép thành ảnh động; `stats` in số liệu sức khoẻ dạng JSON.
 
+### Lệnh tắt bằng Makefile
+Gõ `make` (Windows: `mingw32-make`) để xem danh sách. Hay dùng nhất:
+- `make flash`: build và nạp vào CYD.
+- `make stats`: RAM trống thật và thời gian vẽ.
+- `make bench`: đo thời gian vẽ lại cả màn.
+- `make log`: xem log Serial, ví dụ điện thoại có gọi tới trang setup không.
+- `make server-restart`: khởi động lại server sau khi sửa `calendar.txt`.
+- `make check`: chạy test và quét bí mật trước khi push.
+- `make version V=2.0.4`: đổi số phiên bản ở mọi nơi.
+
+Đường dẫn thư viện, cổng COM và tham số server của riêng máy bạn thì ghi vào file `local.mk` (không đưa lên GitHub), ví dụ:
+
+```make
+LIBS = D:/Arduino/libraries
+PORT = COM5
+SERVER_ARGS = --plan pro --reset-weekday 5 --reset-hour 2
+```
+
 ---
 
 ## Xử lý sự cố

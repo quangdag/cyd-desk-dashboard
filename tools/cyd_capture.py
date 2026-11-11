@@ -7,6 +7,8 @@ Screenshots and health numbers from a running CYD over USB (no camera, pixel-exa
     python cyd_capture.py COM8 stats                  heap, Wi-Fi, frame time, latencies (JSON)
     python cyd_capture.py COM8 tour DIR [--gif demo.gif]
                                                       every page -> DIR/<name>.png, optional animated GIF
+    python cyd_capture.py COM8 cmd BENCH [--secs 10]  send a serial command (BENCH, SETUP, RESTART...), print replies
+    python cyd_capture.py COM8 log [--secs 60]        print the serial log with timestamps (portal requests, crashes)
 
 The firmware answers SHOT by reading the panel back line by line (ILI9341 GRAM) at 921600 baud.
 Opening the port does not reset the board (DTR/RTS are held inactive). Needs: pip install pyserial pillow
@@ -78,13 +80,24 @@ def shot(s: serial.Serial) -> Image.Image:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port")
-    ap.add_argument("action", choices=["shot", "tab", "stats", "tour"])
+    ap.add_argument("action", choices=["shot", "tab", "stats", "tour", "cmd", "log"])
     ap.add_argument("arg", nargs="?")
     ap.add_argument("--gif", type=Path, help="tour: also write an animated GIF")
     ap.add_argument("--scale", type=int, default=2)
+    ap.add_argument("--secs", type=float, help="cmd / log: how long to print serial output")
     a = ap.parse_args()
     s = open_port(a.port)
-    if a.action == "stats":
+    if a.action in ("cmd", "log"):
+        if a.action == "cmd":
+            s.write((a.arg or "STATS").upper().encode() + b"\n")
+        secs = a.secs or (10 if a.action == "cmd" else 60)
+        t0 = time.monotonic()
+        s.timeout = 0.2
+        while time.monotonic() - t0 < secs:
+            line = s.readline().decode("utf-8", "replace").rstrip()
+            if line:
+                print(f"{time.monotonic() - t0:7.2f} {line}", flush=True)
+    elif a.action == "stats":
         print(json.dumps(json.loads(command(s, "STATS", "{")), indent=2))
     elif a.action == "tab":
         command(s, f"TAB {int(a.arg)}", "OK")
