@@ -270,6 +270,7 @@ Khi hết giờ, CYD báo, kêu bíp và tự chuyển sang tab Pomodoro. Sau 4 
 | Tab Claude báo **PC OFFLINE** | Server chưa chạy; tường lửa đang chặn (cho phép Private network); máy tính và CYD phải cùng mạng WiFi |
 | Chấm **vàng** mãi không xanh | Chạy `claude auth login`; nếu `server.log` có `HTTP 429` thì chờ vài phút, server tự thử lại |
 | Tab Music báo *Media reader unavailable* | Chưa cài các gói `winrt-...` ở Phần 2, bước 1 |
+| Tab Account báo *needs claude auth login*, góc phải hiện `~EST` | Server tự nhờ Claude CLI gia hạn đăng nhập; nếu vẫn báo thì đăng nhập lại CLI: `claude auth login` |
 | Không hiện thông báo khi Claude xong | Kiểm tra mục `hooks` trong `settings.json` rồi mở phiên Claude Code mới; Settings đang ở **AWAY** và bạn đang ngồi ở máy (chuyển sang **ALWAYS** để thử) |
 | Chạm bị lệch, bấm nút không trúng | Thông số cảm ứng (`TOUCH_RAW_*` trong `ui_build.ino`) được đo cho một tấm cụ thể; tấm khác cần đo lại 4 góc |
 

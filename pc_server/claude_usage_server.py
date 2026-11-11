@@ -273,8 +273,7 @@ def calibrate(store: LogStore, args, session_pct: float, week_pct: float):
 # real time from local log costs, using the calibrated dollar caps.
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-TOKEN_URL = "https://platform.claude.com/v1/oauth/token"      # prod values from the Claude Code CLI
-CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLI_REFRESH_MIN_S = 600   # after a failed CLI refresh, wait this long before trying again
 EXACT_MAX_AGE_S = 30 * 60                                      # older than this -> fall back to estimate
 BACKOFF_MIN_S, BACKOFF_MAX_S = 120, 15 * 60                    # after HTTP 429 (rate limited)
 
@@ -307,6 +306,7 @@ class ExactUsage:
         self.last_error = ""
         self.block_until = 0.0        # monotonic time before which we don't ask again (rate limit)
         self.backoff = 0
+        self.cli_refresh_at = -CLI_REFRESH_MIN_S
 
     # -- credentials --
     def _read_oauth(self) -> dict:
@@ -315,35 +315,35 @@ class ExactUsage:
         except (OSError, ValueError):
             return {}
 
-    def _refresh(self, oauth: dict) -> dict:
-        """Refresh the CLI token and write it back so the CLI stays logged in too."""
-        fresh = self._read_oauth()  # the CLI may have refreshed it already
-        if fresh.get("expiresAt", 0) / 1000 - time.time() > 300:
-            return fresh
-        resp = _http_json(TOKEN_URL, "POST", {"Content-Type": "application/json"}, {
-            "grant_type": "refresh_token",
-            "refresh_token": oauth["refreshToken"],
-            "client_id": CLIENT_ID,
-            "scope": " ".join(oauth.get("scopes") or []),
-        })
-        doc = json.loads(self.creds_path.read_text(encoding="utf-8"))
-        o = doc.setdefault("claudeAiOauth", {})
-        o["accessToken"] = resp["access_token"]
-        if resp.get("refresh_token"):
-            o["refreshToken"] = resp["refresh_token"]
-        o["expiresAt"] = int((time.time() + int(resp.get("expires_in", 3600))) * 1000)
-        tmp = self.creds_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(doc), encoding="utf-8")
-        os.replace(tmp, self.creds_path)  # atomic: never leaves a half-written login file
-        print(f"{datetime.now():%H:%M:%S} refreshed Claude login token", file=sys.stderr)
-        return o
+    def _refresh(self) -> dict:
+        """Let the official Claude Code CLI renew its own login: `claude auth status` refreshes an
+        expired access token and writes it back to .credentials.json. The server never calls the
+        token endpoint itself. Throttled, so a logged-out CLI is not spawned every poll."""
+        import shutil
+        import subprocess
+        now = time.monotonic()
+        if now - self.cli_refresh_at < CLI_REFRESH_MIN_S:
+            raise RuntimeError("Claude login expired - run: claude auth login")
+        self.cli_refresh_at = now
+        exe = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude.exe")
+        try:
+            subprocess.run([exe, "auth", "status"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=60, creationflags=0x08000000)  # CREATE_NO_WINDOW
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"cannot run the Claude CLI ({exc}) - run: claude auth login") from exc
+        oauth = self._read_oauth()
+        if oauth.get("expiresAt", 0) / 1000 - time.time() < 60:
+            raise RuntimeError("Claude login expired - run: claude auth login")
+        self.cli_refresh_at = 0.0  # worked: allow the next refresh whenever it is due
+        print(f"{datetime.now():%H:%M:%S} Claude CLI refreshed its login token", file=sys.stderr)
+        return oauth
 
     def _token(self) -> str:
         oauth = self._read_oauth()
         if not oauth.get("accessToken"):
             raise RuntimeError("no Claude login - run: claude auth login")
-        if oauth.get("refreshToken") and oauth.get("expiresAt", 0) / 1000 - time.time() < 300:
-            oauth = self._refresh(oauth)
+        if oauth.get("expiresAt", 0) / 1000 - time.time() < 300:
+            oauth = self._refresh()
         return oauth["accessToken"]
 
     # -- fetching --
@@ -357,12 +357,9 @@ class ExactUsage:
                     data = _http_json(USAGE_URL, headers=headers)
                     break
                 except urllib.error.HTTPError as e:
-                    if e.code == 401 and attempt == 0:
-                        o = self._read_oauth()
-                        if o.get("refreshToken"):
-                            o["expiresAt"] = 0
-                            self._refresh(o)
-                            continue
+                    if e.code == 401 and attempt == 0:  # revoked early: let the CLI renew it once
+                        self._refresh()
+                        continue
                     raise
             fh, sd = data.get("five_hour") or {}, data.get("seven_day") or {}
             rows = (data.get("seven_day_breakdown") or {}).get("rows") or []

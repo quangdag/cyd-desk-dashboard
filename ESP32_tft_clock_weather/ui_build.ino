@@ -216,9 +216,10 @@ void create_home_screen() {
 
     home_val[idx] = make_label(t, &fr_num_24, slideshow ? C_BG : C_ACCENT, "--");
     lv_obj_set_pos(home_val[idx], 9, 6);
-    lv_obj_t* name = make_caps(t, slideshow ? C_BG : C_MUTED, slideshow ? "SLIDESHOW" : SCREEN_NAMES[idx]);
+    // "CLAUDE CODE" (102px) khong vua o 98px -> tren Home ghi "CLAUDE"; tieu de trang van day du
+    const char* label = slideshow ? "SLIDESHOW" : idx == SCR_CLAUDE ? "CLAUDE" : SCREEN_NAMES[idx];
+    lv_obj_t* name = make_caps(t, slideshow ? C_BG : C_MUTED, label);
     lv_obj_set_pos(name, 9, 43);
-    if (idx == SCR_CLAUDE) lv_obj_set_style_text_letter_space(name, 0, 0);  // "CLAUDE CODE" vua khit o 98px
     if (!slideshow) {
       home_dot[idx] = make_dot(t, 8, C_ACCENT);
       lv_obj_align(home_dot[idx], LV_ALIGN_TOP_RIGHT, -8, 8);
