@@ -59,6 +59,22 @@ hook as soon as it's tapped.
 **Setup without code** – a fresh board starts a `CYD-Setup` Wi-Fi access point with a captive portal: join it from a
 phone, enter Wi-Fi, server token and location, done. Settings live in NVS; `secrets.h` is optional.
 
+### What the setup page asks for
+
+Join the open Wi-Fi **`CYD-Setup`** from a phone or laptop (it appears about 5 s after the setup screen). The page
+opens by itself; if it doesn't, browse to **`http://192.168.4.1`**. To come back later: Home → ⚙ → **WI-FI SETUP**.
+
+| Field | What to enter | Where to find it |
+|---|---|---|
+| **Wi-Fi network / password** | Your home Wi-Fi | Pick it from the list. **2.4 GHz only**: the ESP32 can't see 5 GHz networks. Leave the password empty to keep the saved one |
+| **PC server token** | The shared secret between the CYD and the PC server | Start the server once (`python pc_server/claude_usage_server.py --plan pro`). It creates `pc_server/token.txt` and prints the token. Open that file (`type pc_server\token.txt` on Windows) and copy the line. If you build with your own `secrets.h`, the token is its `CLAUDE_TOKEN` instead. Leave it empty to use only the clock, weather and Pomodoro |
+| **PC server IP** *(optional)* | Leave empty | The CYD finds the PC through its UDP broadcast. Only if a firewall blocks that: run `ipconfig` on the PC and enter the **IPv4 Address** of the Wi-Fi adapter (e.g. `192.168.1.104`) |
+| **Latitude / Longitude** | Where the weather is for, in decimal degrees | Google Maps → right-click your location → click the numbers at the top of the menu to copy them, e.g. `16.0044, 108.2632`. South and west are negative |
+| **Time zone (POSIX)** | Your zone as a POSIX string | Vietnam / Thailand `ICT-7`, Japan `JST-9`, Singapore `SGT-8`, UK `GMT0BST,M3.5.0/1,M10.5.0`, Central Europe `CET-1CEST,M3.5.0,M10.5.0/3`, US Eastern `EST5EDT,M3.2.0,M11.1.0`. Note the sign: UTC+7 is written `-7` |
+
+**Save and restart**: the CYD joins your Wi-Fi and opens Home. If the PC pages show **PC OFFLINE**, check that the
+token matches `token.txt`, the PC is on the same network and the firewall allows Python on private networks.
+
 ## Architecture
 
 ```mermaid

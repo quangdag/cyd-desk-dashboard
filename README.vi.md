@@ -133,15 +133,24 @@ Muốn đổi tên địa điểm trên tab Weather hay tên máy trên tab Syst
 `"ACER NITRO 5"` trong `ui_build.ino`.
 
 ### Bước cuối: nhập WiFi trên điện thoại
-1. Trên điện thoại, vào WiFi, kết nối mạng **CYD-Setup** (không có mật khẩu).
+> **Nên làm Phần 2 (bước 1–2) trước** để có token của server. Chưa có thì cứ để trống ô token, sau này vào lại
+> **WI-FI SETUP** để điền.
+
+1. Trên điện thoại (hoặc laptop), vào WiFi, kết nối mạng **CYD-Setup** (không có mật khẩu). Mạng này xuất hiện sau
+   khoảng 5 giây kể từ khi CYD hiện màn WI-FI SETUP.
 2. Trang cài đặt tự mở. Nếu không, mở trình duyệt và vào **192.168.4.1**.
-3. Điền:
-   - **Wi-Fi network / password:** WiFi nhà bạn (CYD chỉ bắt WiFi **2,4 GHz**).
-   - **PC server token:** chuỗi trong file `pc_server/token.txt` (server tạo ở lần chạy đầu, Phần 2). Để trống nếu không dùng server.
-   - **PC server IP:** để trống, CYD tự tìm máy tính trong mạng.
-   - **Latitude / Longitude:** toạ độ cho thời tiết (Google Maps → chuột phải vào vị trí → bấm vào cặp số).
-   - **Time zone:** `ICT-7` cho Việt Nam.
-4. Bấm **Save and restart**. CYD vào WiFi nhà và hiện màn HOME.
+3. Điền các ô:
+
+| Ô | Điền gì | Lấy ở đâu |
+|---|---|---|
+| **Wi-Fi network / password** | WiFi nhà bạn | Chọn trong danh sách. CYD chỉ bắt WiFi **2,4 GHz** (không thấy mạng 5 GHz). Để trống mật khẩu = giữ mật khẩu đã lưu |
+| **PC server token** | "Mật khẩu chung" giữa CYD và server trên máy tính | Chạy server một lần (Phần 2, bước 2). Server tạo file **`pc_server/token.txt`** và in token ra màn hình. Mở file đó (Windows: `type pc_server\token.txt`) và chép nguyên dòng. Nếu bạn tự build với `secrets.h` thì token là giá trị `CLAUDE_TOKEN` trong file đó. Để trống nếu chỉ dùng đồng hồ, thời tiết, Pomodoro |
+| **PC server IP** *(không bắt buộc)* | Để trống | CYD tự tìm máy tính qua tín hiệu UDP của server. Chỉ khi tường lửa chặn: trên máy tính chạy `ipconfig`, lấy dòng **IPv4 Address** của card WiFi (ví dụ `192.168.1.104`) |
+| **Latitude / Longitude** | Vĩ độ / kinh độ nơi muốn xem thời tiết, dạng số thập phân | Google Maps → chuột phải vào vị trí → bấm vào cặp số trên cùng để chép, ví dụ `16.0044, 108.2632` (số đầu là vĩ độ, số sau là kinh độ). Nam bán cầu / Tây bán cầu là số âm |
+| **Time zone (POSIX)** | Múi giờ | Việt Nam / Thái Lan: `ICT-7`; Nhật: `JST-9`; Singapore: `SGT-8`; Anh: `GMT0BST,M3.5.0/1,M10.5.0`. Chú ý dấu: UTC+7 viết là `-7` |
+
+4. Bấm **Save and restart**. CYD vào WiFi nhà và hiện màn HOME. Nếu các tab máy tính báo **PC OFFLINE**: kiểm tra
+   token có trùng `token.txt` không, máy tính và CYD có cùng mạng không, và tường lửa có cho Python dùng mạng Private không.
 
 Sau này muốn đổi WiFi: HOME → nút ⚙ → **WI-FI SETUP**.
 
