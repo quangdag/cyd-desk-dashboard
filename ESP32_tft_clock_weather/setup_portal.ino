@@ -111,22 +111,40 @@ static void portal_save() {
   portal_saved = true;
 }
 
+// Log ngan moi request (Serial 115200): biet dien thoai co toi duoc trang hay khong
+static void portal_log(const char* what) {
+  WebServer& w = *portal_web;
+  Serial.printf("Setup %s: %s%s from %s (RAM %u)\n", what, w.hostHeader().c_str(), w.uri().c_str(),
+                w.client().remoteIP().toString().c_str(), (unsigned)dram_free());
+}
+
 void portal_task(void*) {
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(PORTAL_SSID);
-  delay(200);
+  WiFi.onEvent([](arduino_event_id_t ev, arduino_event_info_t info) {
+    if (ev == ARDUINO_EVENT_WIFI_AP_STACONNECTED) Serial.println("Setup: phone joined " PORTAL_SSID);
+    else if (ev == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) Serial.println("Setup: phone left");
+    else if (ev == ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED)
+      Serial.printf("Setup: phone got %s\n", IPAddress(info.wifi_ap_staipassigned.ip.addr).toString().c_str());
+  });
+  // Quet WiFi nha TRUOC khi phat: quet chiem radio vai giay, AP dang phat se mat beacon -> dien thoai rot.
+  // Sau do chi phat AP (khong AP_STA): it RAM hon, radio khong nhay kenh.
+  WiFi.mode(WIFI_STA);
   portal_scan();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(PORTAL_SSID);
   portal_dns = new DNSServer();
   portal_dns->start(53, "*", WiFi.softAPIP());   // moi ten mien -> CYD: dien thoai tu mo trang setup
   portal_web = new WebServer(80);
-  portal_web->on("/", HTTP_GET, portal_page);
-  portal_web->on("/save", HTTP_POST, portal_save);
-  portal_web->onNotFound([]() {                  // trang kiem tra Internet cua dien thoai -> chuyen ve form
+  portal_web->on("/", HTTP_GET, []() { portal_log("page"); portal_page(); });
+  portal_web->on("/save", HTTP_POST, []() { portal_log("save"); portal_save(); });
+  // Trang kiem tra Internet cua dien thoai / laptop (iOS /hotspot-detect.html, Android /generate_204,
+  // Windows /connecttest.txt ...) -> chuyen ve form: he dieu hanh hien "dang nhap mang" va mo trang setup
+  portal_web->onNotFound([]() {
+    portal_log("redirect");
     portal_web->sendHeader("Location", "http://192.168.4.1/", true);
     portal_web->send(302, "text/plain", "");
   });
   portal_web->begin();
-  Serial.println("Wi-Fi setup: join " PORTAL_SSID ", open http://192.168.4.1");
+  Serial.printf("Wi-Fi setup: join " PORTAL_SSID ", open http://192.168.4.1 (RAM %u free)\n", (unsigned)dram_free());
   uint32_t saved_at = 0;
   for (;;) {
     net_heartbeat = millis();

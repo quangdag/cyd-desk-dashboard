@@ -7,12 +7,13 @@ static bool http_get_json(const String& url, JsonDocument& doc, const char* bear
   HTTPClient http;
   http.setConnectTimeout(timeout_ms);
   http.setTimeout(timeout_ms);
+  http.useHTTP10(true);   // khong "chunked" -> doc JSON thang tu socket, khong chep ca body vao String
   if (!http.begin(url)) return false;
   if (bearer) http.addHeader("Authorization", String("Bearer ") + bearer);
   int code = http.GET();
   bool ok = false;
   if (code == HTTP_CODE_OK) {
-    DeserializationError err = deserializeJson(doc, http.getString());
+    DeserializationError err = deserializeJson(doc, http.getStream());
     ok = !err;
     if (err) Serial.printf("JSON error %s: %s\n", err.c_str(), url.c_str());
   } else {
@@ -303,25 +304,37 @@ static void round_art_corners(uint16_t* px) {
 
 static void fetch_album_art() {
   char want[12];
+  bool go = false;
   xSemaphoreTake(data_mutex, portMAX_DELAY);
-  strlcpy(want, shared_claude.media.art_id, sizeof(want));
-  xSemaphoreGive(data_mutex);
-  if (art_dirty || strcmp(want, art_loaded_id) == 0) return;  // UI chua nhan anh truoc, hoac anh khong doi
-  if (!want[0]) {                                             // bai moi khong co anh bia
-    art_front = -1;
-    art_loaded_id[0] = '\0';
-    art_dirty = true;
-    return;
-  }
   int back = art_front == 0 ? 1 : 0;
+  strlcpy(want, shared_claude.media.art_id, sizeof(want));
+  // UI chua nhan anh truoc, hoac anh khong doi -> thoi
+  if (!art_dirty && strcmp(want, art_loaded_id) != 0) {
+    if (!want[0]) {          // bai moi khong co anh bia
+      art_front = -1;
+      art_loaded_id[0] = '\0';
+      art_dirty = true;
+    } else {
+      if (!art_buf[back]) {  // cap phat lan dau (UI tra lai sau khi roi tab Music)
+        art_buf[back] = (uint8_t*)heap_caps_malloc(ART_BYTES, MALLOC_CAP_8BIT);
+        art_dsc[back].data = art_buf[back];
+      }
+      go = art_buf[back] != nullptr;
+      art_busy = go;
+    }
+  }
+  xSemaphoreGive(data_mutex);
+  if (!go) return;
   HTTPClient http;
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(server_url("/v1/media/art"))) return;
-  http.addHeader("Authorization", String("Bearer ") + netcfg.token);
-  const size_t need = sizeof(art_buf[0]);
+  const size_t need = ART_BYTES;
   bool ok = false;
-  if (http.GET() == HTTP_CODE_OK && http.getSize() == (int)need) {
+  if (http.begin(server_url("/v1/media/art"))) {
+    http.addHeader("Authorization", String("Bearer ") + netcfg.token);
+    ok = http.GET() == HTTP_CODE_OK && http.getSize() == (int)need;
+  }
+  if (ok) {
     WiFiClient* st = http.getStreamPtr();
     size_t got = 0;
     uint32_t t0 = millis();
@@ -333,11 +346,15 @@ static void fetch_album_art() {
     ok = got == need;
   }
   http.end();
-  if (!ok) return;
-  round_art_corners((uint16_t*)art_buf[back]);
-  strlcpy(art_loaded_id, want, sizeof(art_loaded_id));
-  art_front = back;
-  art_dirty = true;
+  if (ok) round_art_corners((uint16_t*)art_buf[back]);
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  art_busy = false;
+  if (ok) {
+    strlcpy(art_loaded_id, want, sizeof(art_loaded_id));
+    art_front = back;
+    art_dirty = true;
+  }
+  xSemaphoreGive(data_mutex);
 }
 
 void network_task(void*) {
@@ -352,6 +369,7 @@ void network_task(void*) {
   for (;;) {
     uint32_t now = millis();
     net_heartbeat = now;
+    dev.net_stack_free = uxTaskGetStackHighWaterMark(NULL);
 
     if (WiFi.status() != WL_CONNECTED) {
       if (was_connected) { dev.wifi_drops++; was_connected = false; }

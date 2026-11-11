@@ -86,13 +86,85 @@ static void settings_open_cb(lv_event_t* e) {
   open_tab(SCR_SETTINGS);
 }
 
+// ---- Style dung chung ----
+// Moi lv_obj_set_style_* tao 1 style cuc bo rieng cho object (2-3 lan malloc, moi lan them ~16 B quan ly heap).
+// ~240 object x vai thuoc tinh = hang chuc KB. Widget giong nhau dung chung 1 lv_style_t (moi object chi
+// them 1 con tro); thu tu uu tien nhu style cuc bo (them sau style theme) -> hinh ve y het.
+enum StyleKind : uint8_t { ST_TEXT, ST_CENTER, ST_FILL, ST_BAR, ST_BAR_IND, ST_BTN, ST_PRESSED };
+struct StyleSlot { uint8_t kind; uint32_t a, b; lv_style_t style; };
+static StyleSlot style_slots[72];
+static int style_slot_count = 0;
+
+// Style cho (kind, a, b); *fresh = true khi vua tao -> nguoi goi dat thuoc tinh. nullptr khi het cho.
+static lv_style_t* shared_style(uint8_t kind, uint32_t a, uint32_t b, bool* fresh) {
+  for (int i = 0; i < style_slot_count; i++) {
+    StyleSlot& s = style_slots[i];
+    if (s.kind == kind && s.a == a && s.b == b) { *fresh = false; return &s.style; }
+  }
+  if (style_slot_count >= (int)(sizeof(style_slots) / sizeof(style_slots[0]))) {
+    Serial.println("style_slots full -> local style");
+    return nullptr;
+  }
+  StyleSlot& s = style_slots[style_slot_count++];
+  s.kind = kind;
+  s.a = a;
+  s.b = b;
+  lv_style_init(&s.style);
+  *fresh = true;
+  return &s.style;
+}
+
+// Chu: font + mau (+ gian chu cho nhan in hoa)
+static void style_text(lv_obj_t* obj, const lv_font_t* font, uint32_t color, int letter_space) {
+  bool fresh;
+  lv_style_t* st = shared_style(ST_TEXT, (uint32_t)(uintptr_t)font, color | ((uint32_t)letter_space << 24), &fresh);
+  if (!st) {
+    lv_obj_set_style_text_font(obj, font, 0);
+    lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
+    if (letter_space) lv_obj_set_style_text_letter_space(obj, letter_space, 0);
+    return;
+  }
+  if (fresh) {
+    lv_style_set_text_font(st, font);
+    lv_style_set_text_color(st, lv_color_hex(color));
+    if (letter_space) lv_style_set_text_letter_space(st, letter_space);
+  }
+  lv_obj_add_style(obj, st, 0);
+}
+
+// Nen dac: mau + bo goc (cham, duong ke, o Home, khung anh bia, nen trang)
+static void style_fill(lv_obj_t* obj, uint32_t color, int radius, lv_style_selector_t sel = 0) {
+  bool fresh;
+  lv_style_t* st = shared_style(ST_FILL, color, (uint32_t)radius, &fresh);
+  if (!st) {
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, sel);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(color), sel);
+    if (radius) lv_obj_set_style_radius(obj, radius, sel);
+    return;
+  }
+  if (fresh) {
+    lv_style_set_bg_opa(st, LV_OPA_COVER);
+    lv_style_set_bg_color(st, lv_color_hex(color));
+    if (radius) lv_style_set_radius(st, radius);
+  }
+  lv_obj_add_style(obj, st, sel);
+}
+
+// Mau nen khi bam (o Home, nut)
+static void style_pressed(lv_obj_t* obj, uint32_t color) {
+  bool fresh;
+  lv_style_t* st = shared_style(ST_PRESSED, color, 0, &fresh);
+  if (!st) { lv_obj_set_style_bg_color(obj, lv_color_hex(color), LV_STATE_PRESSED); return; }
+  if (fresh) lv_style_set_bg_color(st, lv_color_hex(color));
+  lv_obj_add_style(obj, st, LV_STATE_PRESSED);
+}
+
 // ---- Widget dung chung ----
 static void no_click(lv_obj_t* obj) { lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE); }
 
 static lv_obj_t* make_screen() {
   lv_obj_t* scr = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
-  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+  style_fill(scr, C_BG, 0);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(scr, screen_touch_cb, LV_EVENT_SHORT_CLICKED, NULL);
@@ -100,20 +172,32 @@ static lv_obj_t* make_screen() {
   return scr;
 }
 
-static lv_obj_t* make_label(lv_obj_t* parent, const lv_font_t* font, uint32_t color, const char* text) {
+// text phai la chuoi hang (giu nguyen suot doi nhan): nhan tro thang vao, khong chep ra RAM.
+// lv_label_set_text sau nay (so lieu) tu cap phat ban chep rieng.
+static lv_obj_t* make_label_ls(lv_obj_t* parent, const lv_font_t* font, uint32_t color, int letter_space, const char* text) {
   lv_obj_t* l = lv_label_create(parent);
-  lv_obj_set_style_text_font(l, font, 0);
-  lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
-  lv_label_set_text(l, text);
+  style_text(l, font, color, letter_space);
+  lv_label_set_text_static(l, text);
   no_click(l);
   return l;
+}
+
+static lv_obj_t* make_label(lv_obj_t* parent, const lv_font_t* font, uint32_t color, const char* text) {
+  return make_label_ls(parent, font, color, 0, text);
 }
 
 // Nhan co do rong co dinh, can giua (cot du bao)
 static lv_obj_t* make_cell(lv_obj_t* parent, const lv_font_t* font, uint32_t color, int x, int y, int w) {
   lv_obj_t* l = make_label(parent, font, color, "");
   lv_obj_set_width(l, w);
-  lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+  bool fresh;
+  lv_style_t* st = shared_style(ST_CENTER, 0, 0, &fresh);
+  if (st) {
+    if (fresh) lv_style_set_text_align(st, LV_TEXT_ALIGN_CENTER);
+    lv_obj_add_style(l, st, 0);
+  } else {
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+  }
   lv_obj_set_pos(l, x, y);
   return l;
 }
@@ -133,11 +217,19 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
   lv_obj_set_size(bar, w, h);
   lv_obj_set_pos(bar, x, y);
   lv_bar_set_range(bar, 0, 100);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(C_BAR_BG), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(bar, h / 2, LV_PART_MAIN);
-  lv_obj_set_style_radius(bar, h / 2, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+  style_fill(bar, C_BAR_BG, h / 2, LV_PART_MAIN);
+  bool fresh;
+  lv_style_t* ind = shared_style(ST_BAR_IND, (uint32_t)h, 0, &fresh);
+  if (ind) {
+    if (fresh) {
+      lv_style_set_radius(ind, h / 2);
+      lv_style_set_bg_color(ind, lv_color_hex(C_ACCENT));
+    }
+    lv_obj_add_style(bar, ind, LV_PART_INDICATOR);
+  } else {
+    lv_obj_set_style_radius(bar, h / 2, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+  }
   no_click(bar);
   return bar;
 }
@@ -147,16 +239,13 @@ static void make_divider(lv_obj_t* parent, int y) {
   lv_obj_remove_style_all(d);
   lv_obj_set_size(d, 292, 1);
   lv_obj_set_pos(d, 14, y);
-  lv_obj_set_style_bg_color(d, lv_color_hex(C_BAR_BG), 0);
-  lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+  style_fill(d, C_BAR_BG, 0);
   no_click(d);
 }
 
 // Nhan chu in hoa kieu tap chi: nho, gian chu
 static lv_obj_t* make_caps(lv_obj_t* parent, uint32_t color, const char* text) {
-  lv_obj_t* l = make_label(parent, &lv_font_montserrat_12, color, text);
-  lv_obj_set_style_text_letter_space(l, 1, 0);
-  return l;
+  return make_label_ls(parent, &lv_font_montserrat_12, color, 1, text);
 }
 
 static void title(lv_obj_t* scr, const char* text) {
@@ -168,9 +257,7 @@ static lv_obj_t* make_dot(lv_obj_t* parent, int size, uint32_t color) {
   lv_obj_t* d = lv_obj_create(parent);
   lv_obj_remove_style_all(d);
   lv_obj_set_size(d, size, size);
-  lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(d, lv_color_hex(color), 0);
+  style_fill(d, color, LV_RADIUS_CIRCLE);
   no_click(d);
   return d;
 }
@@ -181,10 +268,21 @@ static lv_obj_t* make_btn(lv_obj_t* parent, int x, int y, int w, int h, int radi
   lv_obj_t* b = lv_button_create(parent);
   lv_obj_set_size(b, w, h);
   lv_obj_set_pos(b, x, y);
-  lv_obj_set_style_radius(b, radius, 0);
-  lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
-  lv_obj_set_style_bg_color(b, lv_color_hex(bg == C_ACCENT ? C_ACCENT_P : C_TILE_P), LV_STATE_PRESSED);
-  lv_obj_set_style_shadow_width(b, 0, 0);
+  bool fresh;
+  lv_style_t* st = shared_style(ST_BTN, bg, (uint32_t)radius, &fresh);
+  if (st) {
+    if (fresh) {
+      lv_style_set_radius(st, radius);
+      lv_style_set_bg_color(st, lv_color_hex(bg));
+      lv_style_set_shadow_width(st, 0);
+    }
+    lv_obj_add_style(b, st, 0);
+  } else {
+    lv_obj_set_style_radius(b, radius, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+  }
+  style_pressed(b, bg == C_ACCENT ? C_ACCENT_P : C_TILE_P);
   lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void*)user);
   lv_obj_t* l = make_label(b, font, fg, text);
   lv_obj_center(l);
@@ -213,10 +311,8 @@ void create_home_screen() {
     lv_obj_remove_style_all(t);
     lv_obj_set_size(t, 98, 63);
     lv_obj_set_pos(t, x, y);
-    lv_obj_set_style_radius(t, 10, 0);
-    lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(t, lv_color_hex(slideshow ? C_ACCENT : C_TILE), 0);
-    lv_obj_set_style_bg_color(t, lv_color_hex(slideshow ? C_ACCENT_P : C_TILE_P), LV_STATE_PRESSED);
+    style_fill(t, slideshow ? C_ACCENT : C_TILE, 10);
+    style_pressed(t, slideshow ? C_ACCENT_P : C_TILE_P);
     lv_obj_add_flag(t, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(t, tile_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)idx);
@@ -261,8 +357,7 @@ void create_clock_screen() {
   lv_obj_t* rule = lv_obj_create(scr);
   lv_obj_remove_style_all(rule);
   lv_obj_set_size(rule, 120, 1);
-  lv_obj_set_style_bg_color(rule, lv_color_hex(C_BAR_BG), 0);
-  lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
+  style_fill(rule, C_BAR_BG, 0);
   lv_obj_align(rule, LV_ALIGN_BOTTOM_MID, 0, -46);
   no_click(rule);
   lb_clock_weather = make_label(scr, &lv_font_montserrat_14, C_MUTED, "");
@@ -431,9 +526,7 @@ void create_music_screen() {
   lv_obj_remove_style_all(frame);
   lv_obj_set_size(frame, ART_SIZE, ART_SIZE);
   lv_obj_set_pos(frame, 14, 32);
-  lv_obj_set_style_radius(frame, ART_RADIUS, 0);
-  lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(frame, lv_color_hex(C_TILE), 0);
+  style_fill(frame, C_TILE, ART_RADIUS);
   no_click(frame);
   lv_obj_t* note = make_label(frame, &lv_font_montserrat_24, C_MUTED, LV_SYMBOL_AUDIO);
   lv_obj_center(note);
@@ -446,9 +539,10 @@ void create_music_screen() {
   lv_obj_set_width(mu_title, 196);
   lv_label_set_long_mode(mu_title, LV_LABEL_LONG_SCROLL_CIRCULAR);  // ten dai -> chay chu
   lv_obj_set_pos(mu_title, 108, 38);  // font co them 2px tren dau cho dau tieng Thai
-  mu_artist = make_label(scr, &mont_vi_14, C_MUTED, "Play something on Spotify or YouTube");
+  mu_artist = make_label(scr, &mont_vi_14, C_MUTED, "");
   lv_obj_set_width(mu_artist, 196);
   lv_label_set_long_mode(mu_artist, LV_LABEL_LONG_DOT);
+  lv_label_set_text(mu_artist, "Play something on Spotify or YouTube");   // ban chep: che do "..." sua chuoi
   lv_obj_set_pos(mu_artist, 108, 69);
 
   mu_bar = make_bar(scr, 14, 124, 292, 4);
@@ -647,10 +741,9 @@ void create_setup_screen() {
                                        "Enter your Wi-Fi and the PC token"};
   static const char* const big[2] = {"CYD-Setup", "192.168.4.1"};
   int y = 36;
+  static const char* const nums[3] = {"1", "2", "3"};
   for (int i = 0; i < 3; i++) {
-    char num[4];
-    snprintf(num, sizeof(num), "%d", i + 1);
-    lv_obj_t* n = make_caps(scr, C_MUTED, num);
+    lv_obj_t* n = make_caps(scr, C_MUTED, nums[i]);
     lv_obj_set_pos(n, 14, y + 2);
     lv_obj_t* t = make_label(scr, &lv_font_montserrat_14, C_FG, steps[i]);
     lv_obj_set_pos(t, 32, y);
@@ -758,6 +851,10 @@ void create_permission_card() {
 }
 
 void create_all_screens() {
+  if (portal_active) {   // Wi-Fi setup: chi man huong dan, de RAM cho WiFi phat + web server
+    create_setup_screen();
+    return;
+  }
   create_home_screen();
   create_clock_screen();
   create_weather_screen();
@@ -767,8 +864,7 @@ void create_all_screens() {
   create_music_screen();
   create_pc_screen();
   create_pomo_screen();
-  create_settings_screen();
-  if (portal_active) create_setup_screen();   // Device: tao khi mo lan dau (show_screen)
+  // Settings / Device: tao khi mo, xoa khi roi (show_screen)
   create_flash_badge();
   create_toast();
   create_permission_card();

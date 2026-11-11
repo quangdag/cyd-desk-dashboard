@@ -42,6 +42,7 @@ struct NetConfig {
 struct DevStats {
   volatile uint32_t wifi_drops = 0, server_ms = 0, server_fail = 0, weather_ms = 0, weather_fail = 0;
   volatile uint32_t frame_us_avg = 0, frame_us_max = 0, frames = 0;
+  volatile uint32_t net_stack_free = 0;   // stack task mang con trong it nhat (byte)
 };
 
 // ---- Du lieu tu mang ----

@@ -113,6 +113,11 @@ Rồi mở **Tools → Board → Boards Manager**, tìm **esp32** (của Espress
 
 > Hai thiết lập quan trọng trong `lv_conf.h`: `LV_USE_STDLIB_MALLOC` = `LV_STDLIB_CLIB` (LVGL dùng bộ nhớ chung
 > của ESP32; bộ nhớ mặc định 36 KB không đủ cho 12 trang) và `LV_FONT_MONTSERRAT_12/14/16/20/24` = `1`.
+>
+> RAM: số "free heap" của Arduino (`ESP.getFreeHeap()`) cộng cả ~36 KB IRAM mà `malloc()` không dùng được, nên trang
+> Device và lệnh `STATS` báo RAM thật (DRAM 8-bit): khoảng 50 KB trống khi chạy bình thường, khoảng 108 KB ở chế độ
+> Wi-Fi setup. Nếu thêm trang mới, hãy dùng style chung (`style_text`, `style_fill` trong `ui_build.ino`) thay cho
+> `lv_obj_set_style_*` trên từng widget.
 
 **Bước 4. (Tuỳ chọn) Nạp sẵn WiFi.** Không bắt buộc: WiFi, token và vị trí nhập trên điện thoại ở bước cuối.
 Nếu muốn nạp sẵn, chép `ESP32_tft_clock_weather/secrets.example.h` thành `secrets.h` rồi điền vào. `secrets.h` đã có
@@ -308,7 +313,8 @@ python tools/cyd_capture.py COM8 shot man-hinh.png
 | Không thấy cổng COM | Thay cáp USB có truyền dữ liệu; cài driver CH340 |
 | Màn trắng hoặc màu bị ngược | Chưa chép `config/User_Setup.h` vào `TFT_eSPI` |
 | Lỗi biên dịch về `lv_conf.h` hoặc thiếu font | Chưa chép `config/lv_conf.h` cạnh thư mục `lvgl` |
-| Điện thoại không thấy WiFi **CYD-Setup** | CYD chưa ở trang WI-FI SETUP: HOME → ⚙ → **WI-FI SETUP** |
+| Điện thoại không thấy WiFi **CYD-Setup** | CYD chưa ở trang WI-FI SETUP: HOME → ⚙ → **WI-FI SETUP**. WiFi xuất hiện sau khoảng 5 giây (CYD quét WiFi nhà trước) |
+| Đã vào **CYD-Setup** nhưng trang không tự mở | Mở trình duyệt, gõ **192.168.4.1**. Muốn xem CYD có nhận được yêu cầu không: mở Serial Monitor 115200, mỗi lần điện thoại gọi tới sẽ có dòng `Setup page` / `Setup redirect` |
 | Không có giờ, không có thời tiết | Kiểm tra tên/mật khẩu WiFi ở trang Wi-Fi setup; CYD chỉ bắt WiFi **2,4 GHz** |
 | Tab Claude báo **PC OFFLINE** | Server chưa chạy; tường lửa đang chặn (cho phép Private network); máy tính và CYD phải cùng mạng WiFi; token ở CYD phải trùng `token.txt` |
 | Chấm **vàng** mãi không xanh | Chạy `claude auth login`; nếu `server.log` có `HTTP 429` thì chờ vài phút, server tự thử lại |

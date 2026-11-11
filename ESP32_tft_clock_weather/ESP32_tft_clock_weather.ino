@@ -50,6 +50,7 @@
 #define SCREEN_HEIGHT 320
 // Bo dem ve 1/4 man hinh (truoc la 1/10): it lan day SPI hon -> doi tab va chu chay muot hon
 #define DRAW_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 4 * (LV_COLOR_DEPTH / 8))
+// (Do bang lenh BENCH: 1/4 ve lai ca man 54.7 ms, 1/8 75.7 ms -> giu 1/4 du ton 19 KB RAM)
 
 #define TFT_BL_PIN 21      // den nen: HIGH = sang 100% (khong PWM, khong tu giam)
 
@@ -89,8 +90,10 @@
 // Bao ve khi chay 24/7
 #define NET_STALL_RESTART_MS    180000UL   // task mang dung > 3 phut -> khoi dong lai
 #define HEAP_CHECK_INTERVAL      60000UL
-#define HEAP_CRITICAL_BYTES      12000     // khoi bo nho lon nhat < 12 KB -> khoi dong lai ngay
-#define HEAP_LOW_BYTES           30000     // < 30 KB -> khoi dong lai luc 4:00 sang
+// Khoi DRAM lon nhat (dram_largest). Binh thuong ~49 KB; ~18 KB khi giu anh bia tab Music.
+// Ve 1 chu so lon can ~3 KB lien tuc: duoi muc nay LVGL het bo nho va treo -> khoi dong lai cho sach.
+#define HEAP_CRITICAL_BYTES       6000     // < 6 KB -> khoi dong lai ngay
+#define HEAP_LOW_BYTES           16000     // < 16 KB -> khoi dong lai luc 4:00 sang
 
 #define SCREEN_OFF_AFTER_MS     120000UL   // SCREEN = WITH PC: mat PC 2 phut -> tat den nen
 #define SCREEN_WAKE_MS           30000UL   // cham khi den tat -> sang 30s
@@ -159,11 +162,16 @@ static volatile bool portal_active = false;   // dang o che do Wi-Fi setup
 static volatile ScreenState current_screen = SCR_HOME;
 static volatile uint32_t net_heartbeat = 0;  // task mang cap nhat moi vong -> loop phat hien treo
 
-// Anh bia album: 2 bo dem (task mang ghi vao bo dem khong dang hien thi, roi doi)
-static uint8_t art_buf[2][ART_SIZE * ART_SIZE * 2];
+// Anh bia album: 2 bo dem (task mang ghi vao bo dem khong dang hien thi, roi doi).
+// Chi cap phat khi o tab Music, tra lai sau khi roi tab ART_KEEP_MS (25 KB RAM cho phan con lai).
+// Bao ve boi data_mutex: art_buf, art_busy, art_loaded_id.
+#define ART_BYTES (ART_SIZE * ART_SIZE * 2)
+#define ART_KEEP_MS 300000UL   // 5 phut: slideshow quay lai Music van con anh
+static uint8_t* art_buf[2] = {nullptr, nullptr};
 static lv_image_dsc_t art_dsc[2];
 static volatile int art_front = -1;          // bo dem dang hien thi (-1 = khong co anh)
 static volatile bool art_dirty = false;
+static bool art_busy = false;                // task mang dang ghi vao bo dem sau
 static char art_loaded_id[12] = "";
 
 // =========================
@@ -257,6 +265,12 @@ static bool claude_enabled() { return CLAUDE_ENABLED && netcfg.token[0] != '\0';
 static bool get_time_now(struct tm* t) { return getLocalTime(t, 0); }
 
 static bool due(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
+
+// RAM malloc() dung duoc (DRAM 8-bit). ESP.getFreeHeap() cong ca ~36 KB IRAM chi doc/ghi 32-bit,
+// LVGL / WiFi / String khong dung duoc -> so do cao gia, khong dung de canh bao.
+static uint32_t dram_free() { return heap_caps_get_free_size(MALLOC_CAP_8BIT); }
+static uint32_t dram_min() { return heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT); }
+static uint32_t dram_largest() { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT); }
 
 // Thu trong tuan tu ngay duong lich (0 = Chu nhat)
 static int weekday_of(int y, int m, int d) { return (int)((lunar_jd(d, m, y) + 1) % 7); }
@@ -353,10 +367,24 @@ static void save_nav() {
   prefs.putUChar("screen", current_screen);
 }
 
+// Settings / Device it khi mo: tao luc mo, xoa luc roi (giu ~15 KB RAM cho WiFi + ve)
+static bool screen_is_temporary(ScreenState s) { return s == SCR_SETTINGS || s == SCR_DEVICE; }
+
 static void show_screen(ScreenState s) {
-  if (s == SCR_DEVICE && !screens[s]) create_device_screen();   // tao khi mo lan dau (tiet kiem RAM)
+  if (!screens[s]) {
+    if (s == SCR_SETTINGS) create_settings_screen();
+    else if (s == SCR_DEVICE) create_device_screen();
+    else return;   // che do Wi-Fi setup chi co man setup
+  }
+  ScreenState prev = current_screen;
   current_screen = s;
   lv_screen_load(screens[s]);   // doi trang tuc thi (khong hieu ung -> khong giat)
+  if (prev != s && screen_is_temporary(prev) && screens[prev]) {
+    lv_obj_delete_async(screens[prev]);   // async: co the dang o trong su kien cham cua chinh man do
+    screens[prev] = nullptr;
+    if (prev == SCR_SETTINGS) memset(set_btn, 0, sizeof(set_btn));
+    else { memset(dv_val, 0, sizeof(dv_val)); dv_uptime = nullptr; }
+  }
   last_screen_switch = millis();
   if (s == SCR_CLAUDE || s == SCR_ACCOUNT || s == SCR_PC || s == SCR_MUSIC) claude_poll_now = true;
   if (s == SCR_DEVICE) update_device_display();
@@ -395,7 +423,7 @@ static void guard_tick() {
     delay(100);
     ESP.restart();
   }
-  uint32_t largest = ESP.getMaxAllocHeap();
+  uint32_t largest = dram_largest();
   if (largest < HEAP_CRITICAL_BYTES) {
     Serial.printf("Heap critical (%u) -> restart\n", (unsigned)largest);
     delay(100);
@@ -409,7 +437,7 @@ static void guard_tick() {
   }
   static int n = 0;
   if (++n % 10 == 0) {  // log moi 10 phut
-    Serial.printf("Heap: %u free, largest %u\n", (unsigned)ESP.getFreeHeap(), (unsigned)largest);
+    Serial.printf("RAM: %u free, largest %u, lowest %u\n", (unsigned)dram_free(), (unsigned)largest, (unsigned)dram_min());
   }
 }
 
@@ -458,6 +486,7 @@ static void render_event_cb(lv_event_t* e) {
 //   SHOT   -> "SHOT 320 240 921600", doi toc do 921600, gui 320x240 RGB565 tung dong, roi ve 115200
 //   TAB n  -> mo trang n (ScreenState), tra "OK"
 //   STATS  -> 1 dong JSON so lieu suc khoe
+//   BENCH  -> thoi gian ve lai ca man cua 7 tab (do anh huong cua DRAW_BUF_SIZE, style, font)
 //   SETUP  -> khoi dong lai vao trang Wi-Fi setup     RESTART -> khoi dong lai
 // tools/cyd_capture.py dung cac lenh nay
 // =========================
@@ -495,23 +524,40 @@ static void serial_tick(lv_display_t* disp) {
     if (strcmp(cmd, "SHOT") == 0) {
       lv_refr_now(disp);   // ve xong moi thu dang cho truoc khi doc lai man hinh
       capture_screen(disp);
-    } else if (sscanf(cmd, "TAB %d", &n) == 1 && n >= 0 && n < SCREEN_COUNT) {
+    } else if (sscanf(cmd, "TAB %d", &n) == 1 && n >= 0 && n < SCREEN_COUNT && !portal_active) {
       if (n == SCR_HOME) go_home();
       else open_tab((ScreenState)n);
       lv_refr_now(disp);
       Serial.println("OK");
+    } else if (strcmp(cmd, "BENCH") == 0 && !portal_active) {   // ve lai ca man 5 lan moi tab, in thoi gian
+      ScreenState back = current_screen;
+      const ScreenState tabs[] = {SCR_HOME, SCR_CLOCK, SCR_WEATHER, SCR_FORECAST, SCR_CLAUDE, SCR_MUSIC, SCR_POMO};
+      uint32_t total = 0;
+      for (ScreenState t : tabs) {
+        show_screen(t);
+        lv_refr_now(disp);
+        uint32_t t0 = micros();
+        for (int i = 0; i < 5; i++) { lv_obj_invalidate(screens[t]); lv_refr_now(disp); feedLoopWDT(); }
+        uint32_t us = (micros() - t0) / 5;
+        total += us;
+        Serial.printf("BENCH %d %.1f ms\n", t, us / 1000.0);
+      }
+      Serial.printf("BENCH avg %.1f ms (buf %u B)\n", total / 7000.0, (unsigned)sizeof(draw_buf));
+      show_screen(back);
     } else if (strcmp(cmd, "SETUP") == 0) {
       request_portal_and_restart();
     } else if (strcmp(cmd, "RESTART") == 0) {
       ESP.restart();
     } else if (strcmp(cmd, "STATS") == 0) {
-      Serial.printf("{\"fw\":\"%s\",\"uptime_s\":%lu,\"heap\":%u,\"heap_min\":%u,\"largest\":%u,\"rssi\":%d,"
-                    "\"wifi_drops\":%u,\"frame_ms_avg\":%.1f,\"frame_ms_max\":%.1f,\"server_ms\":%u,"
-                    "\"server_fail\":%u,\"weather_ms\":%u,\"weather_fail\":%u}\n",
-                    FW_VERSION, millis() / 1000, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-                    (unsigned)ESP.getMaxAllocHeap(), WiFi.RSSI(), (unsigned)dev.wifi_drops,
+      // heap / heap_min / largest: RAM malloc dung duoc (DRAM). iram: phan chi 32-bit (truoc day bi cong vao heap)
+      Serial.printf("{\"fw\":\"%s\",\"uptime_s\":%lu,\"heap\":%u,\"heap_min\":%u,\"largest\":%u,\"iram\":%u,"
+                    "\"rssi\":%d,\"wifi_drops\":%u,\"frame_ms_avg\":%.1f,\"frame_ms_max\":%.1f,\"server_ms\":%u,"
+                    "\"server_fail\":%u,\"weather_ms\":%u,\"weather_fail\":%u,\"net_stack_free\":%u}\n",
+                    FW_VERSION, millis() / 1000, (unsigned)dram_free(), (unsigned)dram_min(), (unsigned)dram_largest(),
+                    (unsigned)(ESP.getFreeHeap() - dram_free()), WiFi.RSSI(), (unsigned)dev.wifi_drops,
                     dev.frame_us_avg / 1000.0, dev.frame_us_max / 1000.0, (unsigned)dev.server_ms,
-                    (unsigned)dev.server_fail, (unsigned)dev.weather_ms, (unsigned)dev.weather_fail);
+                    (unsigned)dev.server_fail, (unsigned)dev.weather_ms, (unsigned)dev.weather_fail,
+                    (unsigned)dev.net_stack_free);
     }
   }
 }
@@ -540,7 +586,7 @@ void setup() {
   touchscreen.begin(touch_spi);
   touchscreen.setRotation(2);
 
-  // === Anh bia album: mo ta anh RGB565 80x80 tro vao 2 bo dem ===
+  // === Anh bia album: mo ta anh RGB565 80x80 (bo dem cap phat khi o tab Music) ===
   for (int i = 0; i < 2; i++) {
     memset(&art_dsc[i], 0, sizeof(art_dsc[i]));
     art_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -548,8 +594,7 @@ void setup() {
     art_dsc[i].header.w = ART_SIZE;
     art_dsc[i].header.h = ART_SIZE;
     art_dsc[i].header.stride = ART_SIZE * 2;
-    art_dsc[i].data_size = sizeof(art_buf[i]);
-    art_dsc[i].data = art_buf[i];
+    art_dsc[i].data_size = ART_BYTES;
   }
 
   // === Khoi tao LVGL + man hinh ===
@@ -569,8 +614,8 @@ void setup() {
   lv_indev_set_long_press_time(indev, LONG_PRESS_MS);
 
   portal_active = !netcfg.ssid[0] || portal_requested();  // chua co WiFi (ban build chung) / bam WI-FI SETUP
-  create_all_screens();
-  pomo_update_display();
+  create_all_screens();   // che do Wi-Fi setup: chi man setup (WiFi phat + web server can RAM)
+  if (!portal_active) pomo_update_display();
 
   // Khoi phuc che do + tab truoc khi mat dien
   nav_mode = (NavMode)prefs.getUChar("mode", MODE_SLIDESHOW);
@@ -583,8 +628,7 @@ void setup() {
   lv_timer_handler();
 
   // LVGL dung heap chung cua ESP32 (LV_STDLIB_CLIB trong lv_conf.h)
-  Serial.printf("Heap after UI: %u bytes free, largest block %u\n", (unsigned)ESP.getFreeHeap(),
-                (unsigned)ESP.getMaxAllocHeap());
+  Serial.printf("RAM after UI: %u bytes free, largest block %u\n", (unsigned)dram_free(), (unsigned)dram_largest());
 
   // === WiFi khong chan: mang chay o task rieng, UI van chay khi mat mang ===
   if (portal_active) {
@@ -593,14 +637,29 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.begin(netcfg.ssid, netcfg.pass);
-    xTaskCreatePinnedToCore(network_task, "net", 10240, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(network_task, "net", 8192, NULL, 1, NULL, 0);   // dung toi da ~4.7 KB (STATS net_stack_free)
   }
 
   enableLoopWDT();   // loop() treo > 5s -> chip tu khoi dong lai
   Serial.println("Setup completed!");
 }
 
+// Che do Wi-Fi setup: chi man huong dan (khong co tab nao khac de cap nhat)
+static void portal_loop() {
+  static unsigned long last = 0;
+  if (millis() - last >= DISPLAY_UPDATE_INTERVAL) {
+    update_setup_display();
+    last = millis();
+  }
+  serial_tick(main_disp);
+  guard_tick();
+  backlight_tick(false);
+  lv_timer_handler();
+  delay(5);
+}
+
 void loop() {
+  if (portal_active) { portal_loop(); return; }
   unsigned long now = millis();
 
   if (nav_mode == MODE_SLIDESHOW && now - last_screen_switch >= settings.slide_s * 1000UL) {
@@ -612,7 +671,7 @@ void loop() {
     pomo_update_display();
     if (current_screen == SCR_MUSIC) update_music_progress();
     if (current_screen == SCR_DEVICE) update_device_display();
-    if (portal_active) update_setup_display();
+    release_album_art_tick();
     last_display_update = now;
   }
   update_weather_display();

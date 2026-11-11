@@ -98,8 +98,20 @@ flowchart LR
   itself and hands SNTP plain IP addresses, so SNTP never touches DNS.
 - **Panel readback** – the screenshot tool reads the ILI9341 GRAM back over SPI. This panel returns the bytes as
   blue, red, green, so the tool remaps the fields (worked out by comparing against the known UI palette).
-- **Memory** – LVGL uses the C heap (`LV_STDLIB_CLIB`), rarely used pages are created on first open, and the Device
-  page shows the lowest free heap since boot so regressions are visible.
+- **Memory: the heap number that lied** – `ESP.getFreeHeap()` reported ~48 KB free, but it counts ~36 KB of IRAM
+  that only allows 32-bit access, which `malloc()` for LVGL, Wi-Fi and `String` can't use. The real figure
+  (`heap_caps_get_free_size(MALLOC_CAP_8BIT)`) was 12 KB, dipping to 1.7 KB, and in Wi-Fi setup mode 3.6 KB: LVGL failed
+  to allocate a glyph buffer, its assert spun forever and the loop watchdog rebooted the board, which looked like lag,
+  a frozen screen and a setup page that never loaded. The pages were the biggest user (81 KB for ~240 widgets). The fix:
+  - shared `lv_style_t` objects instead of per-widget local styles, and constant label text that isn't copied;
+  - Settings and Device are built when opened and freed when you leave them;
+  - the album-art buffers (25 KB) are allocated only while the Music page is in use;
+  - setup mode builds only its own screen and runs the access point alone;
+  - JSON is parsed straight from the socket.
+
+  Result: 52 KB free with a 37 KB low point in normal use, and 108 KB in setup mode, with every page pixel-identical
+  (checked with the screenshot tool). The draw buffer stays at ¼ screen: the `BENCH` serial command measured a full
+  redraw at 55 ms with it and 76 ms at ⅛. `STATS` and the Device page now report the real figure.
 
 ## Tech
 

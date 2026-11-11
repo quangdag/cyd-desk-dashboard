@@ -64,6 +64,12 @@ static void format_lunar(const struct tm& t, char* out, size_t n) {
   snprintf(out, n, "%s tháng %d%s âm lịch · %s", dname, l.month, l.leap ? " nhuận" : "", yname);
 }
 
+// Chi dat lai chu khi noi dung doi: lv_label_set_text luon cap phat lai chuoi + danh dau ve lai
+// (cac nhan cap nhat moi giay phan lon khong doi)
+static void set_text(lv_obj_t* l, const char* text) {
+  if (strcmp(lv_label_get_text(l), text) != 0) lv_label_set_text(l, text);
+}
+
 static void set_pct_bar(lv_obj_t* bar, int pct) {
   pct = constrain(pct, 0, 100);
   lv_bar_set_value(bar, pct, LV_ANIM_OFF);
@@ -86,18 +92,18 @@ void update_clock_display() {
   if (!get_time_now(&t)) return;
   char buf[96];
   strftime(buf, sizeof(buf), "%H:%M:%S", &t);
-  lv_label_set_text(lb_clock_time, buf);
+  set_text(lb_clock_time, buf);
   strftime(buf, sizeof(buf), "%H:%M", &t);
-  lv_label_set_text(home_val[SCR_CLOCK], buf);
-  lv_label_set_text(home_clock, buf);
+  set_text(home_val[SCR_CLOCK], buf);
+  set_text(home_clock, buf);
 
   static int last_mday = -1;
   if (t.tm_mday != last_mday) {  // ngay + am lich chi tinh lai khi sang ngay moi
     last_mday = t.tm_mday;
     strftime(buf, sizeof(buf), "%A, %d %b %Y", &t);
-    lv_label_set_text(lb_clock_date, buf);
+    set_text(lb_clock_date, buf);
     format_lunar(t, buf, sizeof(buf));
-    lv_label_set_text(lb_clock_lunar, buf);
+    set_text(lb_clock_lunar, buf);
   }
 }
 
@@ -247,9 +253,9 @@ static void update_music_progress() {
   pos = min(pos, m.dur_s);
   char buf[16];
   fmt_mmss(pos, buf, sizeof(buf));
-  lv_label_set_text(mu_pos, buf);
+  set_text(mu_pos, buf);
   fmt_mmss(m.dur_s, buf, sizeof(buf));
-  lv_label_set_text(mu_dur, buf);
+  set_text(mu_dur, buf);
   lv_bar_set_value(mu_bar, pos * 100 / m.dur_s, LV_ANIM_OFF);
 }
 
@@ -285,7 +291,7 @@ static void update_music_display(const MediaData& m) {
 void update_album_art() {
   if (!art_dirty) return;
   int f = art_front;
-  if (f >= 0) {
+  if (f >= 0 && art_buf[f]) {
     lv_image_set_src(mu_art, &art_dsc[f]);   // anh RGB565 trong RAM ve truc tiep (cache anh dang tat)
     lv_obj_invalidate(mu_art);               // ve lai du cung con tro (2 bo dem dung luan phien)
     lv_obj_remove_flag(mu_art, LV_OBJ_FLAG_HIDDEN);
@@ -293,6 +299,29 @@ void update_album_art() {
     lv_obj_add_flag(mu_art, LV_OBJ_FLAG_HIDDEN);
   }
   art_dirty = false;
+}
+
+// Roi tab Music qua ART_KEEP_MS -> tra 2 bo dem anh bia (25 KB) cho WiFi + ve. Goi moi giay.
+// Chi UI giai phong (anh dang khong hien -> LVGL khong doc bo dem nua); bo qua khi task mang dang ghi.
+static void release_album_art_tick() {
+  static unsigned long away_since = 0;
+  if (current_screen == SCR_MUSIC || (!art_buf[0] && !art_buf[1])) { away_since = 0; return; }
+  if (!away_since) { away_since = millis(); return; }
+  if (millis() - away_since < ART_KEEP_MS) return;
+  xSemaphoreTake(data_mutex, portMAX_DELAY);
+  if (!art_busy) {
+    lv_obj_add_flag(mu_art, LV_OBJ_FLAG_HIDDEN);
+    lv_image_set_src(mu_art, NULL);
+    for (int i = 0; i < 2; i++) {
+      heap_caps_free(art_buf[i]);
+      art_buf[i] = nullptr;
+      art_dsc[i].data = nullptr;
+    }
+    art_front = -1;
+    art_dirty = false;
+    art_loaded_id[0] = '\0';
+  }
+  xSemaphoreGive(data_mutex);
 }
 
 // =========================
@@ -459,25 +488,24 @@ static void update_device_display() {
   char buf[48];
   unsigned long up = millis() / 1000;
   snprintf(buf, sizeof(buf), "UP %lud %02luh %02lum", up / 86400, up / 3600 % 24, up / 60 % 60);
-  lv_label_set_text(dv_uptime, buf);
+  set_text(dv_uptime, buf);
   snprintf(buf, sizeof(buf), "%.1f ms avg | %.0f max", dev.frame_us_avg / 1000.0, dev.frame_us_max / 1000.0);
-  lv_label_set_text(dv_val[0], buf);
-  snprintf(buf, sizeof(buf), "%u KB | block %u KB", (unsigned)(ESP.getFreeHeap() / 1024),
-           (unsigned)(ESP.getMaxAllocHeap() / 1024));
-  lv_label_set_text(dv_val[1], buf);
-  snprintf(buf, sizeof(buf), "%u KB since boot", (unsigned)(ESP.getMinFreeHeap() / 1024));
-  lv_label_set_text(dv_val[2], buf);
+  set_text(dv_val[0], buf);
+  snprintf(buf, sizeof(buf), "%u KB | block %u KB", (unsigned)(dram_free() / 1024), (unsigned)(dram_largest() / 1024));
+  set_text(dv_val[1], buf);
+  snprintf(buf, sizeof(buf), "%u KB since boot", (unsigned)(dram_min() / 1024));
+  set_text(dv_val[2], buf);
   if (WiFi.status() == WL_CONNECTED) snprintf(buf, sizeof(buf), "%d dBm | %u drops", WiFi.RSSI(), (unsigned)dev.wifi_drops);
   else snprintf(buf, sizeof(buf), "offline | %u drops", (unsigned)dev.wifi_drops);
-  lv_label_set_text(dv_val[3], buf);
-  lv_label_set_text(dv_val[4], WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "--");
+  set_text(dv_val[3], buf);
+  set_text(dv_val[4], WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "--");
   if (!claude_enabled()) snprintf(buf, sizeof(buf), "off (no token)");
   else snprintf(buf, sizeof(buf), "%u ms | %u errors", (unsigned)dev.server_ms, (unsigned)dev.server_fail);
-  lv_label_set_text(dv_val[5], buf);
+  set_text(dv_val[5], buf);
   snprintf(buf, sizeof(buf), "%u ms | %u errors", (unsigned)dev.weather_ms, (unsigned)dev.weather_fail);
-  lv_label_set_text(dv_val[6], buf);
+  set_text(dv_val[6], buf);
   snprintf(buf, sizeof(buf), "%s | LVGL %d.%d.%d", FW_VERSION, LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
-  lv_label_set_text(dv_val[7], buf);
+  set_text(dv_val[7], buf);
 }
 
 // Wi-Fi setup: bao khi dien thoai da noi vao CYD-Setup
@@ -486,7 +514,7 @@ static void update_setup_display() {
   if (portal_saved) snprintf(buf, sizeof(buf), "SAVED, RESTARTING...");
   else if (portal_clients) snprintf(buf, sizeof(buf), "PHONE CONNECTED - OPEN THE PAGE");
   else snprintf(buf, sizeof(buf), "WAITING FOR A PHONE...");
-  lv_label_set_text(su_status, buf);
+  set_text(su_status, buf);
 }
 
 void update_claude_display() {
@@ -581,18 +609,22 @@ static void pomo_update_display() {
   unsigned long secs = (left + 999) / 1000;
   char buf[48];
   snprintf(buf, sizeof(buf), "%02lu:%02lu", secs / 60, secs % 60);
-  lv_label_set_text(po_time, buf);
-  lv_label_set_text(home_val[SCR_POMO], buf);
-  lv_label_set_text(po_phase, phases[pomo_phase]);
-  lv_obj_set_style_text_color(po_phase, lv_color_hex(pomo_phase == POMO_FOCUS ? C_ACCENT : C_OK), 0);
+  set_text(po_time, buf);
+  set_text(home_val[SCR_POMO], buf);
+  set_text(po_phase, phases[pomo_phase]);
+  static int colored_phase = -1;   // mau chi doi khi doi pha (dat style moi giay -> tinh lai style + ve lai)
+  if (colored_phase != pomo_phase) {
+    colored_phase = pomo_phase;
+    lv_obj_set_style_text_color(po_phase, lv_color_hex(pomo_phase == POMO_FOCUS ? C_ACCENT : C_OK), 0);
+    lv_obj_set_style_bg_color(po_bar, lv_color_hex(pomo_phase == POMO_FOCUS ? C_ACCENT : C_OK), LV_PART_INDICATOR);
+  }
   unsigned long total = pomo_duration(pomo_phase);
   lv_bar_set_value(po_bar, (int)((total - min(left, total)) * 100 / total), LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(po_bar, lv_color_hex(pomo_phase == POMO_FOCUS ? C_ACCENT : C_OK), LV_PART_INDICATOR);
-  lv_label_set_text(po_btn_label, pomo_running ? "Pause" : "Start");
+  set_text(po_btn_label, pomo_running ? "Pause" : "Start");
   snprintf(buf, sizeof(buf), "%d SESSION%s DONE", pomo_done, pomo_done == 1 ? "" : "S");
-  lv_label_set_text(po_count, buf);
+  set_text(po_count, buf);
   snprintf(buf, sizeof(buf), "FOCUS %d  |  BREAK %d  |  LONG %d MIN", pomo_min[0], pomo_min[1], pomo_min[2]);
-  lv_label_set_text(po_len, buf);
+  set_text(po_len, buf);
 }
 
 static void pomo_tick() {
