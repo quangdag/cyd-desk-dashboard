@@ -6,10 +6,12 @@
 // Hieu chinh do tren chinh tam cam ung nay (cham 4 goc, 21 lan): gia tri tho XPT2046 o
 // setRotation(2) tai 4 canh cua man ngang 320x240. Ngang (trai->phai) = raw y giam dan,
 // doc (tren->duoi) = raw x tang dan.
+// TOP / BOTTOM do lai 2026-11-11 tu cac lan bam that (log Serial): gia tri cu 514 / 3428 doc mep duoi lech
+// xuong ~18 px -> nut sat mep duoi (DEVICE INFO, WI-FI SETUP, CANCEL) hay bam truot.
 #define TOUCH_RAW_LEFT   3712
 #define TOUCH_RAW_RIGHT   499
-#define TOUCH_RAW_TOP     514
-#define TOUCH_RAW_BOTTOM 3428
+#define TOUCH_RAW_TOP     469
+#define TOUCH_RAW_BOTTOM 3676
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
   LV_UNUSED(indev);
   bool touched = touchscreen.tirqTouched() && touchscreen.touched();
@@ -20,6 +22,14 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     data->state = LV_INDEV_STATE_RELEASED;
     return;
   }
+  static bool was_touched = false;
+  if (touched && !was_touched) {
+    // Vua cham: luc nhan con nhe, mau dau lech toi ~20 px (do qua Serial) ma LVGL chon nut theo diem dau tien.
+    // Doi tin hieu on dinh roi doc lai.
+    delay(12);
+    touched = touchscreen.tirqTouched() && touchscreen.touched();
+  }
+  was_touched = touched;
   if (touched) {
     wake_screen(SCREEN_WAKE_MS);
     TS_Point p = touchscreen.getPoint();
